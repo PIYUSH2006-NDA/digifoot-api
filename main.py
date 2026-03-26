@@ -7,7 +7,7 @@ import os
 app = FastAPI()
 
 # ✅ CORRECT BASE URL
-BASE_URL = "https://something.onrender.com"
+BASE_URL = ""
 
 
 @app.post("/process_multi")
