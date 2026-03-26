@@ -33,7 +33,7 @@ async def generate_render_model(files: List[UploadFile] = File(...)):
 
         return {
             "status": "success",
-            "file_url": file_url
+            "message": "API working"
         }
 
     except Exception as e:
