@@ -1,6 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import FileResponse
-from typing import List
 import os
 import shutil
 import uuid
@@ -23,33 +22,47 @@ def home():
 
 
 # ---------------------------
-# 🔥 MAIN PROCESS ENDPOINT
+# 🔥 UPDATED INPUT FORMAT
 # ---------------------------
 @app.post("/process_multi")
-async def generate_render_model(request: Request, files: List[UploadFile] = File(...)):
-
+async def process_multi(
+    request: Request,
+    right_loaded: UploadFile = File(...),
+    left_loaded: UploadFile = File(...),
+    right_unloaded: UploadFile = File(...),
+    left_unloaded: UploadFile = File(...),
+    right_insole: UploadFile = File(...),
+    left_insole: UploadFile = File(...)
+):
     try:
-        print("🔥 REAL PIPELINE RUN")
-
-        if not files:
-            return {"error": "No files uploaded"}
+        print("🔥 REAL PIPELINE RUN (NEW INPUT FORMAT)")
 
         image_paths = []
 
         # ---------------------------
-        # SAVE UPLOADED FILES (SAFE)
+        # SAVE FILE FUNCTION
         # ---------------------------
-        for file in files:
+        def save_file(file):
             unique_name = f"{uuid.uuid4()}_{file.filename}"
-            file_path = os.path.join(UPLOAD_DIR, unique_name)
+            path = os.path.join(UPLOAD_DIR, unique_name)
 
-            with open(file_path, "wb") as buffer:
+            with open(path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
 
-            image_paths.append(file_path)
+            return path
 
         # ---------------------------
-        # RUN PIPELINE
+        # SAVE ALL INPUTS
+        # ---------------------------
+        image_paths.append(save_file(right_loaded))
+        image_paths.append(save_file(left_loaded))
+        image_paths.append(save_file(right_unloaded))
+        image_paths.append(save_file(left_unloaded))
+        image_paths.append(save_file(right_insole))
+        image_paths.append(save_file(left_insole))
+
+        # ---------------------------
+        # RUN PIPELINE (UNCHANGED)
         # ---------------------------
         result = run_pipeline(image_paths, OUTPUT_DIR)
 
@@ -74,14 +87,13 @@ async def generate_render_model(request: Request, files: List[UploadFile] = File
         print("✅ FINAL GLB GENERATED")
 
         # ---------------------------
-        # DYNAMIC BASE URL (IMPORTANT)
+        # CREATE DOWNLOAD URL
         # ---------------------------
         base_url = str(request.base_url).rstrip("/")
-
         file_url = f"{base_url}/download/{glb_name}"
 
         # ---------------------------
-        # CLEANUP UPLOAD FILES
+        # CLEANUP
         # ---------------------------
         for path in image_paths:
             try:
@@ -101,7 +113,7 @@ async def generate_render_model(request: Request, files: List[UploadFile] = File
 
 
 # ---------------------------
-# 🔥 DOWNLOAD ENDPOINT
+# DOWNLOAD ENDPOINT
 # ---------------------------
 @app.get("/download/{filename}")
 def download_file(filename: str):
