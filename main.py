@@ -64,7 +64,13 @@ async def process_multi(
         # ---------------------------
         # RUN PIPELINE (UNCHANGED)
         # ---------------------------
-        result = run_pipeline(image_paths, OUTPUT_DIR)
+        print("⚠️ PIPELINE TEMP DISABLED")
+
+        result = {
+            "blender_stl": None,
+            "parametric_stl": None,
+            "analysis": {}
+        }
 
         blender_stl = result.get("blender_stl")
         parametric_stl = result.get("parametric_stl")
