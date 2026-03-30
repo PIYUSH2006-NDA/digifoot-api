@@ -1,5 +1,0 @@
-fastapi
-uvicorn
-trimesh
-numpy
-python-multipart
