@@ -1,39 +1,98 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import FileResponse
 from typing import List
-import trimesh
 import os
+import shutil
+import uuid
+import trimesh
+
+from backend.sole.pipeline import run_pipeline
 
 app = FastAPI()
 
-# ✅ CORRECT BASE URL
-BASE_URL = ""
+UPLOAD_DIR = "uploads"
+OUTPUT_DIR = "outputs"
+
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
+@app.get("/")
+def home():
+    return {"status": "API running"}
+
+
+# ---------------------------
+# 🔥 MAIN PROCESS ENDPOINT
+# ---------------------------
 @app.post("/process_multi")
-async def generate_render_model(files: List[UploadFile] = File(...)):
+async def generate_render_model(request: Request, files: List[UploadFile] = File(...)):
 
     try:
-        print("🔥 CLEAN RUN")
+        print("🔥 REAL PIPELINE RUN")
 
-        mesh = trimesh.creation.box([0.2, 0.1, 0.02])
+        if not files:
+            return {"error": "No files uploaded"}
 
-        output_dir = "outputs"
-        os.makedirs(output_dir, exist_ok=True)
+        image_paths = []
 
-        file_name = "insole.glb"
-        glb_path = os.path.join(output_dir, file_name)
+        # ---------------------------
+        # SAVE UPLOADED FILES (SAFE)
+        # ---------------------------
+        for file in files:
+            unique_name = f"{uuid.uuid4()}_{file.filename}"
+            file_path = os.path.join(UPLOAD_DIR, unique_name)
+
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+
+            image_paths.append(file_path)
+
+        # ---------------------------
+        # RUN PIPELINE
+        # ---------------------------
+        result = run_pipeline(image_paths, OUTPUT_DIR)
+
+        blender_stl = result.get("blender_stl")
+        parametric_stl = result.get("parametric_stl")
+
+        final_stl = blender_stl if blender_stl else parametric_stl
+
+        if final_stl is None:
+            return {"error": "No STL generated"}
+
+        # ---------------------------
+        # CONVERT STL → GLB
+        # ---------------------------
+        mesh = trimesh.load(final_stl)
+
+        glb_name = f"insole_{uuid.uuid4()}.glb"
+        glb_path = os.path.join(OUTPUT_DIR, glb_name)
 
         mesh.export(glb_path)
 
-        print("✅ GLB GENERATED")
+        print("✅ FINAL GLB GENERATED")
 
-        # ✅ CORRECT URL
-        file_url = f"{BASE_URL}/download/{file_name}"
+        # ---------------------------
+        # DYNAMIC BASE URL (IMPORTANT)
+        # ---------------------------
+        base_url = str(request.base_url).rstrip("/")
+
+        file_url = f"{base_url}/download/{glb_name}"
+
+        # ---------------------------
+        # CLEANUP UPLOAD FILES
+        # ---------------------------
+        for path in image_paths:
+            try:
+                os.remove(path)
+            except:
+                pass
 
         return {
             "status": "success",
-            "message": "API working"
+            "file_url": file_url,
+            "analysis": result.get("analysis", {})
         }
 
     except Exception as e:
@@ -41,17 +100,16 @@ async def generate_render_model(files: List[UploadFile] = File(...)):
         return {"error": str(e)}
 
 
+# ---------------------------
+# 🔥 DOWNLOAD ENDPOINT
+# ---------------------------
 @app.get("/download/{filename}")
 def download_file(filename: str):
 
-    file_path = os.path.join("outputs", filename)
+    file_path = os.path.join(OUTPUT_DIR, filename)
 
     if not os.path.exists(file_path):
         return {"error": "File not found"}
-
-@app.get("/")
-def home():
-    return {"status": "API running"}
 
     return FileResponse(
         path=file_path,
