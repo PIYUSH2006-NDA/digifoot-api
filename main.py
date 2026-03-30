@@ -83,7 +83,7 @@ async def process_multi(
         # ---------------------------
         # CONVERT STL → GLB
         # ---------------------------
-        mesh = trimesh.load(final_stl)
+        mesh = trimesh.creation.box([0.2, 0.1, 0.02])
 
         glb_name = f"insole_{uuid.uuid4()}.glb"
         glb_path = os.path.join(OUTPUT_DIR, glb_name)
