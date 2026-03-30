@@ -5,7 +5,8 @@ import shutil
 import uuid
 import trimesh
 
-from backend.sole.pipeline import run_pipeline
+# ❌ REMOVE THIS FOR NOW
+# from backend.sole.pipeline import run_pipeline
 
 app = FastAPI()
 
@@ -21,9 +22,6 @@ def home():
     return {"status": "API running"}
 
 
-# ---------------------------
-# 🔥 UPDATED INPUT FORMAT
-# ---------------------------
 @app.post("/process_multi")
 async def process_multi(
     request: Request,
@@ -35,13 +33,10 @@ async def process_multi(
     left_insole: UploadFile = File(...)
 ):
     try:
-        print("🔥 REAL PIPELINE RUN (NEW INPUT FORMAT)")
+        print("🔥 SAFE MODE RUN (PIPELINE DISABLED)")
 
         image_paths = []
 
-        # ---------------------------
-        # SAVE FILE FUNCTION
-        # ---------------------------
         def save_file(file):
             unique_name = f"{uuid.uuid4()}_{file.filename}"
             path = os.path.join(UPLOAD_DIR, unique_name)
@@ -51,9 +46,7 @@ async def process_multi(
 
             return path
 
-        # ---------------------------
-        # SAVE ALL INPUTS
-        # ---------------------------
+        # Save all files
         image_paths.append(save_file(right_loaded))
         image_paths.append(save_file(left_loaded))
         image_paths.append(save_file(right_unloaded))
@@ -61,28 +54,7 @@ async def process_multi(
         image_paths.append(save_file(right_insole))
         image_paths.append(save_file(left_insole))
 
-        # ---------------------------
-        # RUN PIPELINE (UNCHANGED)
-        # ---------------------------
-        print("⚠️ PIPELINE TEMP DISABLED")
-
-        result = {
-            "blender_stl": None,
-            "parametric_stl": None,
-            "analysis": {}
-        }
-
-        blender_stl = result.get("blender_stl")
-        parametric_stl = result.get("parametric_stl")
-
-        final_stl = blender_stl if blender_stl else parametric_stl
-
-        if final_stl is None:
-            return {"error": "No STL generated"}
-
-        # ---------------------------
-        # CONVERT STL → GLB
-        # ---------------------------
+        # 🔥 TEMP DUMMY MESH
         mesh = trimesh.creation.box([0.2, 0.1, 0.02])
 
         glb_name = f"insole_{uuid.uuid4()}.glb"
@@ -90,17 +62,10 @@ async def process_multi(
 
         mesh.export(glb_path)
 
-        print("✅ FINAL GLB GENERATED")
-
-        # ---------------------------
-        # CREATE DOWNLOAD URL
-        # ---------------------------
         base_url = str(request.base_url).rstrip("/")
         file_url = f"{base_url}/download/{glb_name}"
 
-        # ---------------------------
-        # CLEANUP
-        # ---------------------------
+        # Cleanup
         for path in image_paths:
             try:
                 os.remove(path)
@@ -110,7 +75,7 @@ async def process_multi(
         return {
             "status": "success",
             "file_url": file_url,
-            "analysis": result.get("analysis", {})
+            "note": "Pipeline temporarily disabled"
         }
 
     except Exception as e:
@@ -118,9 +83,6 @@ async def process_multi(
         return {"error": str(e)}
 
 
-# ---------------------------
-# DOWNLOAD ENDPOINT
-# ---------------------------
 @app.get("/download/{filename}")
 def download_file(filename: str):
 
