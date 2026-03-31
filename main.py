@@ -5,8 +5,7 @@ import shutil
 import uuid
 import trimesh
 
-# ❌ REMOVE THIS FOR NOW
-# from backend.sole.pipeline import run_pipeline
+from backend.sole.pipeline import run_pipeline
 
 app = FastAPI()
 
@@ -22,6 +21,9 @@ def home():
     return {"status": "API running"}
 
 
+# ---------------------------
+# 🔥 UPDATED INPUT FORMAT
+# ---------------------------
 @app.post("/process_multi")
 async def process_multi(
     request: Request,
@@ -33,10 +35,13 @@ async def process_multi(
     left_insole: UploadFile = File(...)
 ):
     try:
-        print("🔥 SAFE MODE RUN (PIPELINE DISABLED)")
+        print("🔥 REAL PIPELINE RUN (RENDER SAFE MODE)")
 
         image_paths = []
 
+        # ---------------------------
+        # SAVE FILE FUNCTION
+        # ---------------------------
         def save_file(file):
             unique_name = f"{uuid.uuid4()}_{file.filename}"
             path = os.path.join(UPLOAD_DIR, unique_name)
@@ -46,7 +51,9 @@ async def process_multi(
 
             return path
 
-        # Save all files
+        # ---------------------------
+        # SAVE ALL INPUTS
+        # ---------------------------
         image_paths.append(save_file(right_loaded))
         image_paths.append(save_file(left_loaded))
         image_paths.append(save_file(right_unloaded))
@@ -54,18 +61,43 @@ async def process_multi(
         image_paths.append(save_file(right_insole))
         image_paths.append(save_file(left_insole))
 
-        # 🔥 TEMP DUMMY MESH
-        mesh = trimesh.creation.box([0.2, 0.1, 0.02])
+        # ---------------------------
+        # RUN PIPELINE
+        # ---------------------------
+        result = run_pipeline(image_paths, OUTPUT_DIR)
+
+        # 🚫 IGNORE BLENDER OUTPUT COMPLETELY (Render safe)
+        parametric_stl = result.get("parametric_stl")
+
+        if not parametric_stl or not os.path.exists(parametric_stl):
+            print("❌ Parametric STL not generated")
+            return {"error": "Pipeline failed to generate STL"}
+
+        # ---------------------------
+        # CONVERT STL → GLB
+        # ---------------------------
+        try:
+            mesh = trimesh.load(parametric_stl)
+        except Exception as e:
+            print("❌ STL Load Failed:", str(e))
+            return {"error": "Invalid STL generated"}
 
         glb_name = f"insole_{uuid.uuid4()}.glb"
         glb_path = os.path.join(OUTPUT_DIR, glb_name)
 
         mesh.export(glb_path)
 
+        print("✅ FINAL GLB GENERATED")
+
+        # ---------------------------
+        # CREATE DOWNLOAD URL
+        # ---------------------------
         base_url = str(request.base_url).rstrip("/")
         file_url = f"{base_url}/download/{glb_name}"
 
-        # Cleanup
+        # ---------------------------
+        # CLEANUP
+        # ---------------------------
         for path in image_paths:
             try:
                 os.remove(path)
@@ -75,7 +107,7 @@ async def process_multi(
         return {
             "status": "success",
             "file_url": file_url,
-            "note": "Pipeline temporarily disabled"
+            "analysis": result.get("analysis", {})
         }
 
     except Exception as e:
@@ -83,6 +115,9 @@ async def process_multi(
         return {"error": str(e)}
 
 
+# ---------------------------
+# DOWNLOAD ENDPOINT
+# ---------------------------
 @app.get("/download/{filename}")
 def download_file(filename: str):
 
