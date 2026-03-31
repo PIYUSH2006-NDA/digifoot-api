@@ -3,7 +3,6 @@ import cv2
 import time
 import hashlib
 import numpy as np
-import subprocess
 import json
 
 from backend.sole.foot_params import extract_params
@@ -20,7 +19,7 @@ import trimesh
 
 
 # ---------------------------
-# 🔥 NEW: ADVANCED EXTRACTION
+# 🔥 ADVANCED EXTRACTION
 # ---------------------------
 def extract_insole_shape(mask):
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -64,12 +63,15 @@ def apply_corrections(params, foot_type):
     return params
 
 
-# Load model once
-model = load_model()
+# ---------------------------
+# LOAD MODEL (SAFE)
+# ---------------------------
 try:
+    model = load_model()
     model.eval()
-except:
-    pass
+except Exception as e:
+    print("⚠️ Model load failed:", str(e))
+    model = None
 
 
 def classify_foot(mask):
@@ -90,6 +92,9 @@ def get_cache_key(image_paths):
     return hashlib.md5(key.encode()).hexdigest()
 
 
+# ---------------------------
+# 🚀 MAIN PIPELINE
+# ---------------------------
 def run_pipeline(image_paths, output_dir):
     os.makedirs(output_dir, exist_ok=True)
 
@@ -117,27 +122,24 @@ def run_pipeline(image_paths, output_dir):
     combined = (combined > 0.25).astype("uint8")
 
     # ---------------------------
-    # 🔥 ML + MULTIVIEW DEPTH
+    # DEPTH (SAFE)
     # ---------------------------
     try:
         print("🧠 ML Depth Prediction...")
-        depth_map = predict_depth(model, combined)
+        if model:
+            depth_map = predict_depth(model, combined)
+        else:
+            raise Exception("Model unavailable")
     except Exception as e:
         print("⚠️ ML failed, fallback to multiview:", str(e))
         depth_map = reconstruct_3d(masks)
 
-    # ---------------------------
-    # FINAL MASK
-    # ---------------------------
     combined = (depth_map > 0.2).astype("uint8")
     combined = cv2.GaussianBlur(combined.astype(np.float32), (15, 15), 0)
     combined = (combined > 0.25).astype("uint8")
 
-    final_mask_path = os.path.abspath(os.path.join(output_dir, "final_mask.png"))
-    cv2.imwrite(final_mask_path, (combined * 255).astype("uint8"))
-
     # ---------------------------
-    # 🧠 ANALYSIS
+    # ANALYSIS
     # ---------------------------
     analysis = analyze_foot(combined)
     if "error" in analysis:
@@ -146,7 +148,7 @@ def run_pipeline(image_paths, output_dir):
     print("🧠 Foot Analysis:", analysis)
 
     # ---------------------------
-    # 🔥 NEW: ADVANCED PARAM FLOW
+    # PARAM EXTRACTION
     # ---------------------------
     contour = extract_insole_shape(combined)
     scale = normalize_scale(combined)
@@ -159,17 +161,14 @@ def run_pipeline(image_paths, output_dir):
         **(advanced_params or {})
     }
 
-    # ---------------------------
-    # FOOT TYPE + CORRECTION
-    # ---------------------------
     foot_type = classify_foot(combined)
     params = apply_corrections(params, foot_type)
 
     # ---------------------------
-    # 🔥 PARAMETRIC MESH
+    # PARAMETRIC MESH
     # ---------------------------
     try:
-        print("🧠 Generating AI parametric mesh...")
+        print("🧠 Generating parametric mesh...")
 
         param_mesh = generate_parametric_foot(depth_map, analysis)
         param_mesh = apply_biomechanical_corrections(param_mesh, analysis)
@@ -186,72 +185,29 @@ def run_pipeline(image_paths, output_dir):
         print("✅ Parametric STL GENERATED")
 
     except Exception as e:
-        print("⚠️ Parametric generation failed:", str(e))
+        print("❌ Parametric generation failed:", str(e))
         param_stl = None
 
     # ---------------------------
-    # STEP 4: BLENDER (FIXED)
+    # 🚫 BLENDER REMOVED (RENDER SAFE)
     # ---------------------------
-    blender_path = r"C:\Program Files\Blender Foundation\Blender 5.1\blender.exe"
-
-    output_stl = os.path.join(output_dir, f"foot_sole_{int(time.time())}.stl")
-    deform_script = os.path.abspath(os.path.join("backend", "sole", "deform_sole.py"))
-
-    param_json = json.dumps(params)
-
-    # 🔥 DEBUG
-    print("\n🚀 Blender Execution Debug:")
-    print("Mask Path:", final_mask_path)
-    print("Output STL:", output_stl)
-    print("Params JSON (short):", param_json[:200])
-    print("Foot Type:", foot_type)
-
-    command = [
-        blender_path,
-        "--background",
-        "--python", deform_script,
-        "--",
-        str(final_mask_path),
-        str(output_stl),
-        str(param_json),
-        str(foot_type)
-    ]
-
-    print("🚀 Running Blender...")
-
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        encoding='utf-8',
-        errors='ignore'
-    )
-
-    print("\n--- Blender STDOUT ---")
-    print(result.stdout)
-
-    print("\n--- Blender STDERR ---")
-    print(result.stderr)
-
-    if result.returncode != 0:
-        raise Exception(f"Blender failed with code {result.returncode}")
-
-    if not os.path.exists(output_stl):
-        raise Exception("STL file not generated")
-
-    print("✅ Blender STL GENERATED")
+    print("⚠️ Blender step skipped (Render safe mode)")
 
     # ---------------------------
     # CACHE SAVE
     # ---------------------------
     try:
-        import shutil
-        shutil.copy(output_stl, cache_path)
+        if param_stl and os.path.exists(param_stl):
+            import shutil
+            shutil.copy(param_stl, cache_path)
     except:
         pass
 
+    # ---------------------------
+    # FINAL RETURN
+    # ---------------------------
     return {
-        "blender_stl": output_stl,
+        "blender_stl": None,
         "parametric_stl": param_stl,
         "analysis": analysis,
         "params": params
