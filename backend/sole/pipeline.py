@@ -6,7 +6,7 @@ import numpy as np
 import json
 
 from backend.sole.foot_params import extract_params
-from inference import segment
+from backend.ml.inference import segment
 from backend.core.biomechanics import apply_biomechanical_corrections
 from backend.ml.model import load_model, predict_depth
 from backend.ml.multiview import reconstruct_3d
