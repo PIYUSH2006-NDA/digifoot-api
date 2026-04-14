@@ -1,0 +1,10 @@
+{
+  "job_id": "1b4cb21dbaef412d",
+  "foot_length_mm": 257.53,
+  "foot_width_mm": 93.26,
+  "arch_height_mm": 70.0,
+  "arch_type": "high",
+  "pressure_score": 0.5083,
+  "confidence_score": 0.3522,
+  "stl_url": "/download-stl/1b4cb21dbaef412d"
+}
