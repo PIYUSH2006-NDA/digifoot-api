@@ -17,8 +17,15 @@ log = get_logger(__name__)
 
 def estimate_normals(points: np.ndarray, k: int = 20) -> np.ndarray:
     """Estimate normals via local PCA on k-nearest neighbours."""
-    log.info("Estimating normals (k=%d)", k)
-    normals = compute_normals_from_points(points, k=k)
+    log.info("Estimating normals (k=%d) on %d points", k, len(points))
+    # FIX: Clamp k to available points
+    effective_k = min(k, len(points))
+    if effective_k < 2:
+        log.warning("Too few points for normal estimation — using up-facing normals")
+        normals = np.zeros_like(points)
+        normals[:, 2] = 1.0
+        return normals.astype(np.float32)
+    normals = compute_normals_from_points(points, k=effective_k)
     log.info("Normals estimated for %d points", len(points))
     return normals
 
@@ -29,33 +36,39 @@ def reconstruct_mesh(
 ) -> trimesh.Trimesh:
     """
     Reconstruct a watertight surface from points.
-    
     Strategy:
-    1. Use Ball Pivoting-like approach via alpha shape (Delaunay + filtering).
-    2. Fall back to convex hull if alpha shape fails.
-    3. Ensure the result is watertight.
+    1. Alpha shape (Delaunay + edge-length filtering).
+    2. Convex hull fallback.
     """
     log.info("Reconstructing mesh from %d points ...", len(points))
 
+    # FIX: Need at least 4 points for 3D reconstruction
+    if len(points) < 4:
+        log.warning("Only %d points — generating minimal tetrahedron", len(points))
+        return _generate_minimal_mesh(points)
+
     try:
-        # Attempt alpha-shape reconstruction via trimesh
         mesh = _alpha_shape_reconstruction(points)
-        if mesh is not None and len(mesh.faces) > 100:
-            log.info("Alpha-shape reconstruction succeeded")
+        if mesh is not None and len(mesh.faces) > 10:
+            log.info("Alpha-shape reconstruction succeeded (%d faces)", len(mesh.faces))
             return mesh
     except Exception as exc:
-        log.warning("Alpha-shape failed: %s - falling back to convex hull", exc)
+        log.warning("Alpha-shape failed: %s — falling back to convex hull", exc)
 
     # Fallback: convex hull (always watertight)
     log.info("Using convex hull reconstruction")
-    hull = ConvexHull(points)
-    mesh = trimesh.Trimesh(
-        vertices=points,
-        faces=hull.simplices,
-        process=True,
-    )
-    trimesh.repair.fix_winding(mesh)
-    trimesh.repair.fix_normals(mesh)
+    try:
+        hull = ConvexHull(points)
+        mesh = trimesh.Trimesh(
+            vertices=points,
+            faces=hull.simplices,
+            process=True,
+        )
+        trimesh.repair.fix_winding(mesh)
+        trimesh.repair.fix_normals(mesh)
+    except Exception as exc:
+        log.warning("ConvexHull failed: %s — generating minimal mesh", exc)
+        return _generate_minimal_mesh(points)
 
     log.info(
         "Reconstructed mesh: %d vertices, %d faces",
@@ -64,14 +77,29 @@ def reconstruct_mesh(
     return mesh
 
 
+def _generate_minimal_mesh(points: np.ndarray) -> trimesh.Trimesh:
+    """Create a valid mesh from very few points by generating a bounding box."""
+    bb_min = points.min(axis=0)
+    bb_max = points.max(axis=0)
+    dims = bb_max - bb_min
+    # Ensure non-zero dimensions
+    for i in range(3):
+        if dims[i] < 1e-6:
+            bb_min[i] -= 0.5
+            bb_max[i] += 0.5
+    mesh = trimesh.creation.box(
+        extents=bb_max - bb_min,
+        transform=trimesh.transformations.translation_matrix((bb_min + bb_max) / 2),
+    )
+    log.info("Generated bounding box mesh: %d verts, %d faces", len(mesh.vertices), len(mesh.faces))
+    return mesh
+
+
 def _alpha_shape_reconstruction(
     points: np.ndarray,
     alpha: float | None = None,
 ) -> trimesh.Trimesh | None:
-    """
-    Compute an alpha shape from 3D points using Delaunay triangulation.
-    Edges longer than 1/alpha are removed.
-    """
+    """Compute an alpha shape from 3D points using Delaunay triangulation."""
     if len(points) < 4:
         return None
 
@@ -81,24 +109,26 @@ def _alpha_shape_reconstruction(
         return None
 
     if alpha is None:
-        # Adaptive alpha: use mean nearest-neighbour distance × 3
         from scipy.spatial import cKDTree
         tree = cKDTree(points)
-        dists, _ = tree.query(points, k=2)
-        alpha = 1.0 / (dists[:, 1].mean() * 3.0)
+        dists, _ = tree.query(points, k=min(2, len(points)))
+        if dists.ndim == 1:
+            mean_dist = dists.mean()
+        else:
+            mean_dist = dists[:, 1].mean() if dists.shape[1] > 1 else dists.mean()
+        if mean_dist < 1e-10:
+            return None
+        alpha = 1.0 / (mean_dist * 3.0)
 
-    # Filter tetrahedra by circumradius
     valid_faces = set()
     for simplex in tri.simplices:
         pts = points[simplex]
-        # Compute max edge length
         edges = []
         for i in range(4):
             for j in range(i + 1, 4):
                 edges.append(np.linalg.norm(pts[i] - pts[j]))
         max_edge = max(edges)
         if max_edge < 1.0 / alpha:
-            # Add all 4 triangular faces of the tetrahedron
             for i in range(4):
                 face = tuple(sorted([simplex[j] for j in range(4) if j != i]))
                 valid_faces.add(face)
@@ -111,7 +141,6 @@ def _alpha_shape_reconstruction(
     trimesh.repair.fix_winding(mesh)
     trimesh.repair.fix_normals(mesh)
     trimesh.repair.fill_holes(mesh)
-
     return mesh
 
 
@@ -121,7 +150,7 @@ def ensure_watertight(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
         log.info("Mesh is already watertight [OK]")
         return mesh
 
-    log.warning("Mesh is NOT watertight - attempting repair ...")
+    log.warning("Mesh is NOT watertight — attempting repair ...")
     trimesh.repair.fix_winding(mesh)
     trimesh.repair.fix_normals(mesh)
     trimesh.repair.fill_holes(mesh)
@@ -129,15 +158,17 @@ def ensure_watertight(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     if mesh.is_watertight:
         log.info("Mesh repaired successfully [OK]")
     else:
-        log.warning("Mesh still not watertight after repair - proceeding anyway")
+        log.warning("Mesh still not watertight after repair — proceeding anyway")
     return mesh
 
 
-def smooth_mesh(
-    mesh: trimesh.Trimesh,
-    iterations: int = 3,
-) -> trimesh.Trimesh:
+def smooth_mesh(mesh: trimesh.Trimesh, iterations: int = 3) -> trimesh.Trimesh:
     """Apply Laplacian smoothing via trimesh."""
+    # FIX: Only smooth if enough geometry exists
+    if len(mesh.vertices) < 10 or len(mesh.faces) < 10:
+        log.warning("Too few faces for smoothing — skipping")
+        return mesh
     log.info("Smoothing mesh (%d iterations)", iterations)
     trimesh.smoothing.filter_laplacian(mesh, iterations=iterations)
     return mesh
+
