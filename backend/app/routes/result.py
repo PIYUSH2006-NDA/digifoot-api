@@ -2,6 +2,8 @@
 Result and status routes.
 GET /result/{job_id}  – full analysis results.
 GET /status/{job_id}  – lightweight status check.
+
+MODIFIED: Responses now include foot_side.
 """
 
 from fastapi import APIRouter, HTTPException, Request
@@ -35,6 +37,7 @@ async def get_status(job_id: str):
         job_id=record.job_id,
         status=JobStatus(record.status),
         message=record.message,
+        foot_side=record.foot_side,
     )
 
 
@@ -73,6 +76,7 @@ async def get_result(job_id: str, request: Request):
 
     return ResultResponse(
         job_id=record.job_id,
+        foot_side=record.foot_side,
         foot_length_mm=record.foot_length_mm,
         foot_width_mm=record.foot_width_mm,
         arch_height_mm=record.arch_height_mm,
