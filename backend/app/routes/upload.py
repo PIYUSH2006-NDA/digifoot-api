@@ -1,9 +1,14 @@
 """
 Upload route.
 POST /upload-scan – accept a zipped LiDAR scan package.
+
+MODIFIED: Accepts `foot_side` query parameter ("left" | "right").
+The iOS app calls this endpoint TWICE — once per foot — so each
+foot gets its own job_id and its own processing pipeline.
 """
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Query
+from typing import Optional
 
 from app.schemas.response_schema import UploadResponse, ErrorResponse
 from app.utils.storage import generate_job_id, save_upload, find_mesh_file
@@ -24,11 +29,20 @@ router = APIRouter(tags=["Upload"])
         "Accepts a ZIP archive containing:\n"
         "- `mesh.obj` or `mesh.ply` – the 3-D foot mesh\n"
         "- `camera_poses.json` (optional)\n"
-        "- `rgb_frames/` and `depth_frames/` (optional)\n\n"
+        "- scan images (optional)\n\n"
+        "Pass `foot_side=left` or `foot_side=right` to tag the scan.\n"
+        "Call this endpoint TWICE (once per foot) to get separate job IDs.\n\n"
         "Returns a `job_id` used for all subsequent requests."
     ),
 )
-async def upload_scan(file: UploadFile = File(...)):
+async def upload_scan(
+    file: UploadFile = File(...),
+    foot_side: Optional[str] = Query(
+        None,
+        description="Which foot: 'left' or 'right'. "
+                    "If omitted, defaults to 'left' for backward compatibility.",
+    ),
+):
     # Validate content type
     if file.content_type not in (
         "application/zip",
@@ -40,8 +54,19 @@ async def upload_scan(file: UploadFile = File(...)):
             detail=f"Expected a ZIP file, got {file.content_type}",
         )
 
+    # Validate foot_side
+    side = (foot_side or "left").lower().strip()
+    if side not in ("left", "right"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"foot_side must be 'left' or 'right', got '{foot_side}'",
+        )
+
     job_id = generate_job_id()
-    log.info("New upload -> job_id=%s  filename=%s", job_id, file.filename)
+    log.info(
+        "New upload -> job_id=%s  foot_side=%s  filename=%s",
+        job_id, side, file.filename,
+    )
 
     try:
         contents = await file.read()
@@ -58,8 +83,13 @@ async def upload_scan(file: UploadFile = File(...)):
             detail="No .obj or .ply mesh file found inside the uploaded archive",
         )
 
-    # Register job
-    record = JobRecord(job_id=job_id, status="pending", message="Scan uploaded")
+    # Register job — now includes foot_side
+    record = JobRecord(
+        job_id=job_id,
+        status="pending",
+        message="Scan uploaded",
+        foot_side=side,
+    )
     set_job(record)
 
-    return UploadResponse(job_id=job_id)
+    return UploadResponse(job_id=job_id, foot_side=side)
