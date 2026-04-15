@@ -18,6 +18,9 @@ from app.utils.logger import get_logger
 
 log = get_logger(__name__)
 
+# Minimum point count below which cleaning is skipped to avoid crashes
+MIN_POINTS_FOR_CLEANING = 20
+
 
 def load_mesh(path: str) -> trimesh.Trimesh:
     """Load a triangle mesh from .obj or .ply."""
@@ -41,7 +44,7 @@ def clean_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     1. Merge duplicate vertices.
     2. Remove degenerate faces.
     3. Remove unreferenced vertices.
-    4. Statistical outlier removal.
+    4. Statistical outlier removal (only if enough points).
     """
     log.info("Cleaning mesh ...")
 
@@ -57,16 +60,22 @@ def clean_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
         mesh.remove_unreferenced_vertices()
         log.info("Removed %d degenerate faces", removed)
 
-    # Statistical outlier removal on vertices
+    # FIX: Skip statistical outlier removal if too few vertices
     points = np.asarray(mesh.vertices)
+    if len(points) < MIN_POINTS_FOR_CLEANING:
+        log.warning(
+            "Only %d vertices — skipping statistical outlier removal (need >=%d)",
+            len(points), MIN_POINTS_FOR_CLEANING,
+        )
+        return mesh
+
     clean_mask = _statistical_outlier_mask(
         points,
-        nb_neighbors=STATISTICAL_NB_NEIGHBORS,
+        nb_neighbors=min(STATISTICAL_NB_NEIGHBORS, len(points) - 1),
         std_ratio=STATISTICAL_STD_RATIO,
     )
     if not clean_mask.all():
         removed = (~clean_mask).sum()
-        # Keep faces whose ALL 3 vertices are inliers
         vertex_map = np.full(len(points), -1, dtype=int)
         new_indices = np.arange(clean_mask.sum())
         vertex_map[clean_mask] = new_indices
@@ -93,13 +102,19 @@ def _statistical_outlier_mask(
     std_ratio: float = 2.0,
 ) -> np.ndarray:
     """Return boolean mask of inlier points using statistical outlier removal."""
-    nn = NearestNeighbors(n_neighbors=min(nb_neighbors + 1, len(points)))
+    # FIX: Clamp nb_neighbors to available points
+    k = min(nb_neighbors + 1, len(points))
+    if k < 2:
+        return np.ones(len(points), dtype=bool)
+
+    nn = NearestNeighbors(n_neighbors=k)
     nn.fit(points)
     distances, _ = nn.kneighbors(points)
-    # Mean distance to k neighbours (skip self at index 0)
     mean_dists = distances[:, 1:].mean(axis=1)
     global_mean = mean_dists.mean()
     global_std = mean_dists.std()
+    if global_std < 1e-10:
+        return np.ones(len(points), dtype=bool)
     threshold = global_mean + std_ratio * global_std
     return mean_dists < threshold
 
@@ -118,6 +133,11 @@ def remove_ground_plane(
     Detect and remove the dominant ground plane using RANSAC.
     Returns the point array with ground points removed.
     """
+    # FIX: Skip if too few points
+    if len(points) < 10:
+        log.warning("Too few points (%d) for ground removal — skipping", len(points))
+        return points
+
     log.info("Detecting ground plane (RANSAC) ...")
 
     best_inliers = np.array([], dtype=int)
@@ -125,11 +145,9 @@ def remove_ground_plane(
 
     rng = np.random.default_rng(42)
     for _ in range(num_iterations):
-        # Sample 3 random points
         idx = rng.choice(n, 3, replace=False)
         p1, p2, p3 = points[idx]
 
-        # Fit plane
         v1 = p2 - p1
         v2 = p3 - p1
         normal = np.cross(v1, v2)
@@ -139,7 +157,6 @@ def remove_ground_plane(
         normal /= norm_len
         d = -np.dot(normal, p1)
 
-        # Measure distances
         dists = np.abs(points @ normal + d)
         inliers = np.where(dists < distance_threshold)[0]
 
@@ -148,7 +165,12 @@ def remove_ground_plane(
 
     log.info("Ground plane inliers: %d / %d", len(best_inliers), n)
 
-    # Remove ground points
+    # FIX: Don't remove ground if it would leave < 4 points
+    remaining = n - len(best_inliers)
+    if remaining < 4:
+        log.warning("Ground removal would leave only %d points — skipping", remaining)
+        return points
+
     mask = np.ones(n, dtype=bool)
     mask[best_inliers] = False
     result = points[mask]
@@ -161,9 +183,12 @@ def downsample_points(
     voxel_size: float = VOXEL_DOWNSAMPLE_SIZE,
 ) -> np.ndarray:
     """Voxel-grid down-sampling on raw points."""
+    if len(points) < 10:
+        log.warning("Too few points for downsampling — skipping")
+        return points
+
     log.info("Down-sampling with voxel size %.2f mm", voxel_size)
-    # Quantise to voxel grid and unique
-    quantised = np.floor(points / voxel_size).astype(np.int64)
+    quantised = np.floor(points / max(voxel_size, 1e-6)).astype(np.int64)
     _, unique_idx = np.unique(quantised, axis=0, return_index=True)
     result = points[unique_idx]
     log.info("Points after down-sample: %d -> %d", len(points), len(result))
