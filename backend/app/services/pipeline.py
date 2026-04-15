@@ -1,6 +1,12 @@
 """
 Main processing pipeline.
 Orchestrates every stage from raw mesh to final insole STL.
+
+MODIFIED:
+  - JobRecord now carries foot_side ("left" | "right").
+  - Pipeline passes foot_side to insole_generator so it can
+    mirror the insole for the correct foot.
+  - Result JSON includes foot_side.
 """
 
 import json
@@ -34,6 +40,7 @@ class JobRecord:
     job_id: str
     status: str = "pending"          # pending | processing | completed | failed
     message: Optional[str] = None
+    foot_side: str = "left"          # NEW: "left" | "right"
     foot_length_mm: float = 0.0
     foot_width_mm: float = 0.0
     arch_height_mm: float = 0.0
@@ -72,53 +79,62 @@ def run_pipeline(job_id: str, mesh_path: str) -> None:
     record.message = "Pipeline started"
     set_job(record)
 
+    foot_side = record.foot_side  # "left" or "right"
+
     t0 = time.time()
     try:
         # ── 1. Load & clean mesh ──────────────────────────────────────
-        log.info("=== [%s] Stage 1: Load & Clean ===", job_id)
+        log.info("=== [%s][%s] Stage 1: Load & Clean ===", job_id, foot_side)
         mesh = load_mesh(mesh_path)
         mesh = clean_mesh(mesh)
 
         # ── 2. Extract points & calibrate ─────────────────────────────
-        log.info("=== [%s] Stage 2: Calibrate ===", job_id)
+        log.info("=== [%s][%s] Stage 2: Calibrate ===", job_id, foot_side)
         points = mesh_to_points(mesh)
         points = auto_calibrate(points)
         if not validate_dimensions(points):
             log.warning("[%s] Dimension validation failed - continuing anyway", job_id)
 
         # ── 3. Remove ground plane ────────────────────────────────────
-        log.info("=== [%s] Stage 3: Ground Removal ===", job_id)
+        log.info("=== [%s][%s] Stage 3: Ground Removal ===", job_id, foot_side)
         points = remove_ground_plane(points)
 
         # ── 4. Segment foot ───────────────────────────────────────────
-        log.info("=== [%s] Stage 4: Segmentation ===", job_id)
+        log.info("=== [%s][%s] Stage 4: Segmentation ===", job_id, foot_side)
         points = segment_foot(points)
         points = refine_segmentation(points)
         points = downsample_points(points)
 
         # ── 5. Reconstruct watertight mesh ────────────────────────────
-        log.info("=== [%s] Stage 5: Reconstruction ===", job_id)
+        log.info("=== [%s][%s] Stage 5: Reconstruction ===", job_id, foot_side)
         normals = estimate_normals(points)
         recon_mesh = reconstruct_mesh(points, normals)
         recon_mesh = ensure_watertight(recon_mesh)
         recon_mesh = smooth_mesh(recon_mesh)
 
         # ── 6. Landmark detection ─────────────────────────────────────
-        log.info("=== [%s] Stage 6: Landmarks ===", job_id)
+        log.info("=== [%s][%s] Stage 6: Landmarks ===", job_id, foot_side)
         landmarks = detect_landmarks(points)
 
         # ── 7. Biomechanical analysis ─────────────────────────────────
-        log.info("=== [%s] Stage 7: Biomechanics ===", job_id)
+        log.info("=== [%s][%s] Stage 7: Biomechanics ===", job_id, foot_side)
         bio = run_biomechanical_analysis(points)
 
         # ── 8. Pressure analysis ──────────────────────────────────────
-        log.info("=== [%s] Stage 8: Pressure ===", job_id)
+        log.info("=== [%s][%s] Stage 8: Pressure ===", job_id, foot_side)
         pressure = run_pressure_analysis(bio.features)
 
         # ── 9. Generate insole STL ────────────────────────────────────
-        log.info("=== [%s] Stage 9: Insole Generation ===", job_id)
+        log.info("=== [%s][%s] Stage 9: Insole Generation ===", job_id, foot_side)
         stl_out = stl_path_for_job(job_id)
-        generate_insole(landmarks, bio.arch_type, stl_out)
+        generate_insole(
+            landmarks=landmarks,
+            arch_type=bio.arch_type,
+            output_path=stl_out,
+            foot_side=foot_side,           # NEW: pass foot side
+            scan_points=points,            # NEW: pass actual scan points
+            reconstructed_mesh=recon_mesh,  # NEW: pass reconstructed mesh
+        )
 
         # ── 10. Finalise ──────────────────────────────────────────────
         elapsed = time.time() - t0
@@ -137,7 +153,7 @@ def run_pipeline(job_id: str, mesh_path: str) -> None:
         # Persist result metadata alongside the scan
         _save_result_json(job_id, record)
 
-        log.info("=== [%s] DONE (%.1fs) ===", job_id, elapsed)
+        log.info("=== [%s][%s] DONE (%.1fs) ===", job_id, foot_side, elapsed)
 
     except Exception:
         tb = traceback.format_exc()
@@ -153,6 +169,7 @@ def _save_result_json(job_id: str, record: JobRecord) -> None:
     out = get_job_dir(job_id) / "result.json"
     data = {
         "job_id": record.job_id,
+        "foot_side": record.foot_side,
         "foot_length_mm": record.foot_length_mm,
         "foot_width_mm": record.foot_width_mm,
         "arch_height_mm": record.arch_height_mm,
