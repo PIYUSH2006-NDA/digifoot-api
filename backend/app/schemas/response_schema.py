@@ -1,5 +1,8 @@
 """
 Pydantic response models for the REST API.
+
+MODIFIED: Added foot_side field to UploadResponse and ResultResponse
+so each response clearly identifies which foot the data belongs to.
 """
 
 from enum import Enum
@@ -21,8 +24,14 @@ class JobStatus(str, Enum):
     failed = "failed"
 
 
+class FootSide(str, Enum):
+    left = "left"
+    right = "right"
+
+
 class UploadResponse(BaseModel):
     job_id: str = Field(..., description="Unique job identifier")
+    foot_side: str = Field(default="left", description="Which foot: left or right")
     message: str = Field(default="Scan uploaded successfully")
 
 
@@ -30,6 +39,7 @@ class StatusResponse(BaseModel):
     job_id: str
     status: JobStatus
     message: Optional[str] = None
+    foot_side: Optional[str] = None
 
 
 class ProcessResponse(BaseModel):
@@ -40,6 +50,7 @@ class ProcessResponse(BaseModel):
 
 class ResultResponse(BaseModel):
     job_id: str
+    foot_side: str = Field(default="left", description="Which foot this result is for")
     foot_length_mm: float = Field(..., description="Foot length in millimetres")
     foot_width_mm: float = Field(..., description="Foot width in millimetres")
     arch_height_mm: float = Field(..., description="Arch height in millimetres")
