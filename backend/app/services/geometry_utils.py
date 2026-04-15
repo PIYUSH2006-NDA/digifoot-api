@@ -1,117 +1,173 @@
 """
-Low-level geometry helpers used across multiple services.
-All coordinates are expected in millimetres unless noted otherwise.
+3-D Reconstruction service.
+Generates a watertight mesh from a cleaned point cloud.
+Uses trimesh + scipy for Poisson-like surface reconstruction.
 """
 
 import numpy as np
-from typing import Tuple
+import trimesh
+from scipy.spatial import ConvexHull, Delaunay
+
+from app.config import POISSON_DEPTH
+from app.utils.logger import get_logger
+from app.services.geometry_utils import compute_normals_from_points
+
+log = get_logger(__name__)
 
 
-def bounding_box(points: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Return (min_corner, max_corner) of an axis-aligned bounding box."""
-    return points.min(axis=0), points.max(axis=0)
+def estimate_normals(points: np.ndarray, k: int = 20) -> np.ndarray:
+    """Estimate normals via local PCA on k-nearest neighbours."""
+    log.info("Estimating normals (k=%d) on %d points", k, len(points))
+    # FIX: Clamp k to available points
+    effective_k = min(k, len(points))
+    if effective_k < 2:
+        log.warning("Too few points for normal estimation — using up-facing normals")
+        normals = np.zeros_like(points)
+        normals[:, 2] = 1.0
+        return normals.astype(np.float32)
+    normals = compute_normals_from_points(points, k=effective_k)
+    log.info("Normals estimated for %d points", len(points))
+    return normals
 
 
-def oriented_bounding_box_dims(points: np.ndarray) -> Tuple[float, float, float]:
+def reconstruct_mesh(
+    points: np.ndarray,
+    normals: np.ndarray | None = None,
+) -> trimesh.Trimesh:
     """
-    Compute length, width, height of the point cloud using PCA-aligned axes.
-    Returns dimensions sorted descending (length ≥ width ≥ height).
+    Reconstruct a watertight surface from points.
+    Strategy:
+    1. Alpha shape (Delaunay + edge-length filtering).
+    2. Convex hull fallback.
     """
-    centroid = points.mean(axis=0)
-    centered = points - centroid
-    cov = np.cov(centered, rowvar=False)
-    eigenvalues, eigenvectors = np.linalg.eigh(cov)
+    log.info("Reconstructing mesh from %d points ...", len(points))
 
-    # Project onto principal components
-    projected = centered @ eigenvectors
-    mins = projected.min(axis=0)
-    maxs = projected.max(axis=0)
-    dims = maxs - mins
-    return tuple(sorted(dims, reverse=True))
+    # FIX: Need at least 4 points for 3D reconstruction
+    if len(points) < 4:
+        log.warning("Only %d points — generating minimal tetrahedron", len(points))
+        return _generate_minimal_mesh(points)
 
+    try:
+        mesh = _alpha_shape_reconstruction(points)
+        if mesh is not None and len(mesh.faces) > 10:
+            log.info("Alpha-shape reconstruction succeeded (%d faces)", len(mesh.faces))
+            return mesh
+    except Exception as exc:
+        log.warning("Alpha-shape failed: %s — falling back to convex hull", exc)
 
-def foot_length_width(points: np.ndarray) -> Tuple[float, float]:
-    """
-    Estimate foot length (longest axis) and width (second axis).
-    Uses PCA so orientation does not matter.
-    """
-    dims = oriented_bounding_box_dims(points)
-    return float(dims[0]), float(dims[1])
+    # Fallback: convex hull (always watertight)
+    log.info("Using convex hull reconstruction")
+    try:
+        hull = ConvexHull(points)
+        mesh = trimesh.Trimesh(
+            vertices=points,
+            faces=hull.simplices,
+            process=True,
+        )
+        trimesh.repair.fix_winding(mesh)
+        trimesh.repair.fix_normals(mesh)
+    except Exception as exc:
+        log.warning("ConvexHull failed: %s — generating minimal mesh", exc)
+        return _generate_minimal_mesh(points)
 
-
-def compute_arch_height(points: np.ndarray) -> float:
-    """
-    Estimate arch height as the vertical distance between the lowest
-    point of the medial arch region and the ground plane.
-
-    Heuristic: take the middle third of the foot along the primary axis
-    and measure height range.
-    """
-    centroid = points.mean(axis=0)
-    centered = points - centroid
-    cov = np.cov(centered, rowvar=False)
-    _, eigvecs = np.linalg.eigh(cov)
-
-    # Primary axis = eigenvector with largest eigenvalue (last column)
-    primary = eigvecs[:, -1]
-    proj = centered @ primary
-    p_min, p_max = proj.min(), proj.max()
-    third = (p_max - p_min) / 3.0
-
-    # Middle third mask
-    mask = (proj >= p_min + third) & (proj <= p_max - third)
-    middle_pts = points[mask]
-
-    if len(middle_pts) < 10:
-        return 0.0
-
-    # Arch height = range along the vertical (Z) axis in the middle section
-    z_vals = middle_pts[:, 2]
-    return float(z_vals.max() - z_vals.min())
+    log.info(
+        "Reconstructed mesh: %d vertices, %d faces",
+        len(mesh.vertices), len(mesh.faces),
+    )
+    return mesh
 
 
-def sample_points_uniform(points: np.ndarray, n: int) -> np.ndarray:
-    """
-    Uniformly resample a point cloud to exactly *n* points.
-    If fewer points exist, upsample with replacement.
-    """
-    num = points.shape[0]
-    if num == 0:
-        return np.zeros((n, 3), dtype=np.float32)
-    if num >= n:
-        indices = np.random.choice(num, n, replace=False)
+def _generate_minimal_mesh(points: np.ndarray) -> trimesh.Trimesh:
+    """Create a valid mesh from very few points by generating a bounding box."""
+    bb_min = points.min(axis=0)
+    bb_max = points.max(axis=0)
+    dims = bb_max - bb_min
+    # Ensure non-zero dimensions
+    for i in range(3):
+        if dims[i] < 1e-6:
+            bb_min[i] -= 0.5
+            bb_max[i] += 0.5
+    mesh = trimesh.creation.box(
+        extents=bb_max - bb_min,
+        transform=trimesh.transformations.translation_matrix((bb_min + bb_max) / 2),
+    )
+    log.info("Generated bounding box mesh: %d verts, %d faces", len(mesh.vertices), len(mesh.faces))
+    return mesh
+
+
+def _alpha_shape_reconstruction(
+    points: np.ndarray,
+    alpha: float | None = None,
+) -> trimesh.Trimesh | None:
+    """Compute an alpha shape from 3D points using Delaunay triangulation."""
+    if len(points) < 4:
+        return None
+
+    try:
+        tri = Delaunay(points)
+    except Exception:
+        return None
+
+    if alpha is None:
+        from scipy.spatial import cKDTree
+        tree = cKDTree(points)
+        dists, _ = tree.query(points, k=min(2, len(points)))
+        if dists.ndim == 1:
+            mean_dist = dists.mean()
+        else:
+            mean_dist = dists[:, 1].mean() if dists.shape[1] > 1 else dists.mean()
+        if mean_dist < 1e-10:
+            return None
+        alpha = 1.0 / (mean_dist * 3.0)
+
+    valid_faces = set()
+    for simplex in tri.simplices:
+        pts = points[simplex]
+        edges = []
+        for i in range(4):
+            for j in range(i + 1, 4):
+                edges.append(np.linalg.norm(pts[i] - pts[j]))
+        max_edge = max(edges)
+        if max_edge < 1.0 / alpha:
+            for i in range(4):
+                face = tuple(sorted([simplex[j] for j in range(4) if j != i]))
+                valid_faces.add(face)
+
+    if not valid_faces:
+        return None
+
+    faces = np.array(list(valid_faces))
+    mesh = trimesh.Trimesh(vertices=points, faces=faces, process=True)
+    trimesh.repair.fix_winding(mesh)
+    trimesh.repair.fix_normals(mesh)
+    trimesh.repair.fill_holes(mesh)
+    return mesh
+
+
+def ensure_watertight(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Attempt to make the mesh watertight."""
+    if mesh.is_watertight:
+        log.info("Mesh is already watertight [OK]")
+        return mesh
+
+    log.warning("Mesh is NOT watertight — attempting repair ...")
+    trimesh.repair.fix_winding(mesh)
+    trimesh.repair.fix_normals(mesh)
+    trimesh.repair.fill_holes(mesh)
+
+    if mesh.is_watertight:
+        log.info("Mesh repaired successfully [OK]")
     else:
-        indices = np.random.choice(num, n, replace=True)
-    return points[indices].astype(np.float32)
+        log.warning("Mesh still not watertight after repair — proceeding anyway")
+    return mesh
 
 
-def normalize_point_cloud(points: np.ndarray) -> np.ndarray:
-    """Centre to origin and scale to unit sphere."""
-    centroid = points.mean(axis=0)
-    pts = points - centroid
-    max_dist = np.linalg.norm(pts, axis=1).max()
-    if max_dist > 0:
-        pts /= max_dist
-    return pts.astype(np.float32)
-
-
-def compute_normals_from_points(points: np.ndarray, k: int = 20) -> np.ndarray:
-    """
-    Estimate normals via local PCA on k-nearest neighbours.
-    Lightweight fallback when Open3D normal estimation isn't applicable.
-    """
-    from scipy.spatial import cKDTree
-
-    tree = cKDTree(points)
-    normals = np.zeros_like(points)
-    for i, pt in enumerate(points):
-        _, idx = tree.query(pt, k=min(k, len(points)))
-        neighbours = points[idx]
-        cov = np.cov(neighbours, rowvar=False)
-        eigvals, eigvecs = np.linalg.eigh(cov)
-        normals[i] = eigvecs[:, 0]  # smallest eigenvalue → normal direction
-    # Consistent orientation: flip normals pointing downward
-    down = np.array([0, 0, -1.0])
-    flip_mask = (normals @ down) > 0
-    normals[flip_mask] *= -1
-    return normals.astype(np.float32)
+def smooth_mesh(mesh: trimesh.Trimesh, iterations: int = 3) -> trimesh.Trimesh:
+    """Apply Laplacian smoothing via trimesh."""
+    # FIX: Only smooth if enough geometry exists
+    if len(mesh.vertices) < 10 or len(mesh.faces) < 10:
+        log.warning("Too few faces for smoothing — skipping")
+        return mesh
+    log.info("Smoothing mesh (%d iterations)", iterations)
+    trimesh.smoothing.filter_laplacian(mesh, iterations=iterations)
+    return mesh
