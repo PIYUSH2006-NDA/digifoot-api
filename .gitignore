@@ -1,0 +1,7 @@
+
+stls/*.stl
+scans/*
+outputs/*
+*.stl
+*.obj
+*.ply
