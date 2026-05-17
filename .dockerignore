@@ -1,0 +1,33 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+.env
+.env.*
+.vscode
+.idea
+.DS_Store
+*.swp
+
+# Runtime / data dirs (skip — mount as volumes instead)
+scans/*
+!scans/.gitkeep
+stls/*
+!stls/.gitkeep
+outputs/*
+!outputs/.gitkeep
+validation_set/*
+!validation_set/.gitkeep
+
+# Large training artifacts
+*.stl
+*.obj
+*.ply
+foot_scan_runs/
+runs/
+
+# Python build
+*.egg-info
+build/
+dist/

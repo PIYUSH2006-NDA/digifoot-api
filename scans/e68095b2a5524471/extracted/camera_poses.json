@@ -1,0 +1,1 @@
+{"frames": [{"intrinsics": {"fx": 1000, "fy": 1000, "cx": 320, "cy": 240}, "extrinsics": {"rotation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]], "translation": [0, 0, 0.5]}}]}

@@ -1,0 +1,44 @@
+# DigiFoot Backend — merged requirements
+# Existing pipeline + v2 depth-only pipeline + training tools
+
+# ── Web framework ────────────────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+pydantic>=2.0.0
+aiofiles>=24.0.0
+
+# ── Numerics ─────────────────────────────────────────────────────────
+numpy>=1.26.0
+scipy>=1.13.0
+scikit-learn>=1.4.0
+
+# ── Computer Vision ──────────────────────────────────────────────────
+opencv-python-headless>=4.10.0     # headless for Docker; use opencv-python for desktop
+
+# ── 3D / Mesh ────────────────────────────────────────────────────────
+open3d==0.18.0
+trimesh>=4.4.0
+xatlas==0.0.11
+
+# ── ML ───────────────────────────────────────────────────────────────
+torch>=2.0.0
+torchvision>=0.16.0
+ultralytics>=8.2.0                 # YOLOv8-seg
+
+# ── Training / dataset utils ─────────────────────────────────────────
+albumentations>=1.3.0
+tqdm>=4.66.0
+pyyaml>=6.0
+Pillow>=10.0.0
+
+# ── Infra (optional — uncomment for Celery/Redis job queue) ──────────
+# redis==5.1.0
+# celery[redis]==5.4.0
+
+# ── Testing ──────────────────────────────────────────────────────────
+requests>=2.31.0
+pytest>=7.4.0
+
+# ── macOS only (CoreML export — install separately) ──────────────────
+# coremltools>=7.0
