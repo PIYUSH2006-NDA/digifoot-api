@@ -15,11 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from .routes import v2_scan
 
 # Try importing legacy routes (graceful skip if not present yet)
-try:
-    from .routes import upload, process, result, download
-    LEGACY_AVAILABLE = True
-except ImportError:
-    LEGACY_AVAILABLE = False
+# Legacy mesh routes disabled — requires ML weights not present in HF deploy
+LEGACY_AVAILABLE = False
 
 logging.basicConfig(
     level=logging.INFO,
