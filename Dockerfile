@@ -1,42 +1,31 @@
-# ----------------------------------------------------------------
-# DigiFoot Backend — Production Docker Image
-# Includes legacy mesh pipeline + v2 depth-only pipeline
-# ----------------------------------------------------------------
 FROM python:3.11-slim
 
-# System deps for trimesh, open3d, OpenCV, ultralytics
+# System deps for Open3D + OpenCV + ultralytics
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        libgomp1 \
-        libgl1 \
-        libglib2.0-0 \
-        libsm6 \
-        libxext6 \
-        libxrender1 \
-        libusb-1.0-0 \
-        wget \
-        ca-certificates \
+        libgomp1 libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
+        wget ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# HF Spaces requires non-root user with UID 1000
+RUN useradd -m -u 1000 user
+USER user
+ENV PATH="/home/user/.local/bin:$PATH"
 
 WORKDIR /app
 
-# Install Python dependencies (cached layer)
-COPY requirements.txt .
+# Copy + install requirements (cached layer)
+COPY --chown=user requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
 
-# Copy application code
-COPY . .
+# Copy app code
+COPY --chown=user . .
 
-# Create runtime directories
+# Create runtime dirs
 RUN mkdir -p scans stls weights outputs validation_set
 
-# Expose the API port
-EXPOSE 8000
+# HF Spaces expects port 7860
+EXPOSE 7860
 
-# Health-check
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
-
-# Start uvicorn
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7860", "--workers", "1"]

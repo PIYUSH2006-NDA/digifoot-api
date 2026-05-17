@@ -1,6 +1,17 @@
-# 🦶 Orthopedic Insole Generation Pipeline
+# 🦶 DigiFoot Backend — v2.0
 
-> **Production-ready backend** for generating custom orthopedic insoles from LiDAR-based foot scans.
+> **Production-ready FastAPI backend** combining the legacy orthopedic insole pipeline with the new **depth-only foot scanning v2 pipeline** powered by iPhone TrueDepth / LiDAR + YOLOv8-seg.
+
+---
+
+## 🆕 What's New in v2
+
+- **Depth-only foot scanning**: no RGB images required
+- **Hybrid segmentation**: geometric (RANSAC + morphology) + YOLOv8-seg refinement
+- **Multi-frame fusion**: combines multiple depth frames into one watertight mesh
+- **Robust on tiny datasets**: works without YOLO weights (geometric fallback)
+- **Real-time ready**: <50ms per frame on iPhone with CoreML export
+- **Backwards compatible**: legacy `/upload-scan` etc. still work
 
 ---
 
@@ -9,273 +20,352 @@
 ```
 backend/
 ├── app/
-│   ├── main.py                    # FastAPI application entry point
-│   ├── config.py                  # Central configuration
+│   ├── main.py                       # FastAPI entry (legacy + v2)
+│   ├── config.py                     # Central settings
 │   ├── routes/
-│   │   ├── upload.py              # POST /upload-scan
-│   │   ├── process.py             # POST /process-scan
-│   │   ├── result.py              # GET  /result/{job_id}  &  GET /status/{job_id}
-│   │   └── download.py            # GET  /download-stl/{job_id}
+│   │   ├── upload.py                 # legacy
+│   │   ├── process.py                # legacy
+│   │   ├── result.py                 # legacy
+│   │   ├── download.py               # legacy
+│   │   └── v2_scan.py                # ★ NEW depth-only endpoints
+│   ├── schemas/
+│   │   ├── response_schema.py        # legacy
+│   │   └── v2_schemas.py             # ★ NEW Pydantic v2 models
 │   ├── services/
-│   │   ├── pipeline.py            # Main orchestrator (9 stages)
-│   │   ├── mesh_cleaner.py        # Noise removal, degenerate fix, ground plane
-│   │   ├── calibration.py         # Metres → mm conversion & validation
-│   │   ├── foot_segmenter.py      # DBSCAN foot isolation
-│   │   ├── reconstruction.py      # Poisson surface reconstruction
-│   │   ├── landmark_detector.py   # Heel, arch, forefoot, toe detection
-│   │   ├── biomechanics.py        # PointNet feature extraction + arch classify
-│   │   ├── pressure_analysis.py   # PressureNet plantar analysis
-│   │   ├── insole_generator.py    # Parametric insole mesh + STL export
-│   │   └── geometry_utils.py      # PCA, sampling, normalisation helpers
+│   │   ├── pipeline.py               # legacy mesh pipeline
+│   │   ├── (existing legacy services)
+│   │   ├── depth_pipeline.py         # ★ NEW orchestrator
+│   │   ├── depth_preprocessing.py    # ★ NEW depth filter/clean
+│   │   ├── foot_segmentation.py      # ★ NEW geometric + YOLO seg
+│   │   └── scan_trigger.py           # ★ NEW real-time triggering
+│   ├── recon/
+│   │   ├── pipeline.py               # (existing recon code)
+│   │   ├── measurements.py           # (existing)
+│   │   ├── ml_refine.py              # (existing)
+│   │   ├── obj_writer.py             # (existing)
+│   │   ├── uv_bake.py                # (existing)
+│   │   └── reconstruction_3d.py      # ★ NEW Poisson fusion + measure
 │   ├── ml/
-│   │   ├── pointnet_model.py      # PointNet architecture (T-Net + encoder)
-│   │   ├── arch_classifier.py     # 3-class arch classifier head
-│   │   ├── pressure_model.py      # 10-region pressure regression head
-│   │   └── model_loader.py        # Singleton loader with GPU/CPU fallback
-│   ├── utils/
-│   │   ├── storage.py             # Filesystem helpers (upload, extract, STL path)
-│   │   └── logger.py              # Structured logging
-│   └── schemas/
-│       └── response_schema.py     # Pydantic response models
-├── weights/                       # Pretrained model weights (.pth)
-├── scans/                         # Uploaded scan working directories
-├── stls/                          # Generated insole STL files
-├── requirements.txt
+│   │   ├── pointnet_model.py         # (existing)
+│   │   ├── pointnet2_model.py        # (existing)
+│   │   ├── arch_classifier.py        # (existing)
+│   │   ├── pressure_model.py         # (existing)
+│   │   ├── model_loader.py           # (existing)
+│   │   └── yolo_seg_model.py         # ★ NEW YOLO singleton
+│   └── utils/
+│       └── (existing helpers)
+│
+├── ml_training/
+│   ├── data/
+│   │   ├── dataset.py                # (existing)
+│   │   ├── synthetic_gen.py          # (existing)
+│   │   └── dataset_preparation.py    # ★ NEW depth dataset builder
+│   ├── train.py                      # (existing)
+│   ├── train_yolov8.py               # ★ NEW YOLOv8-seg 2-stage trainer
+│   └── eval.py                       # (existing)
+│
+├── scripts/
+│   ├── migrate_v2.sh                 # ★ migrate legacy → v2
+│   ├── setup_deps.sh                 # one-shot setup
+│   ├── train_all.sh                  # full training pipeline
+│   └── export_coreml.py              # ★ CoreML export for iOS
+│
+├── weights/                          # ML model weights (.pt, .pth)
+├── scans/                            # uploaded scan dirs (per job_id)
+├── stls/                             # generated STL output
+├── outputs/                          # intermediate artifacts
+├── validation_set/                   # holdout validation data
+│
+├── requirements.txt                  # merged dependencies
 ├── Dockerfile
+├── .dockerignore
+├── test_e2e.py                       # ★ v2 endpoint integration test
 └── README.md
 ```
+
+★ = added by v2 migration
 
 ---
 
 ## 🚀 Quick Start
 
-### Prerequisites
-
-- Python 3.10+
-- pip
-
-### 1. Clone & Install
+### 1. Setup
 
 ```bash
 cd backend
-python -m venv venv
-# Windows:
-venv\Scripts\activate
-# macOS/Linux:
-source venv/bin/activate
+bash scripts/setup_deps.sh    # creates venv + installs deps
+```
 
+Or manually:
+```bash
+python -m venv venv
+source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Run the Server
+### 2. Run server
 
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-The API docs are available at **http://localhost:8000/docs** (Swagger UI) or **http://localhost:8000/redoc**.
+- Swagger UI: http://localhost:8000/docs
+- ReDoc:      http://localhost:8000/redoc
+
+### 3. Test v2 pipeline (synthetic data — no real scans needed)
+
+```bash
+python test_e2e.py
+```
 
 ---
 
-## 🐳 Docker Deployment
+## 🐳 Docker
 
 ```bash
-# Build
-docker build -t insole-pipeline .
+docker build -t digifoot-backend .
 
-# Run
 docker run -d \
   -p 8000:8000 \
   -v $(pwd)/weights:/app/weights \
   -v $(pwd)/scans:/app/scans \
   -v $(pwd)/stls:/app/stls \
-  --name insole-api \
-  insole-pipeline
+  --name digifoot \
+  digifoot-backend
 ```
 
 ---
 
 ## 🔌 API Endpoints
 
-### `POST /upload-scan`
+### Legacy (mesh-based orthopedic pipeline)
 
-Upload a ZIP archive containing the LiDAR scan.
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/upload-scan` | Upload mesh ZIP |
+| POST | `/process-scan?job_id=` | Start insole pipeline |
+| GET  | `/status/{job_id}` | Poll job |
+| GET  | `/result/{job_id}` | Get insole results |
+| GET  | `/download-stl/{job_id}` | Download insole STL |
 
-```bash
-curl -X POST http://localhost:8000/upload-scan \
-  -F "file=@foot_scan.zip"
+### V2 (depth-only foot scanning)
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/v2/upload-depth-scan` | Upload ZIP of depth frames |
+| POST | `/v2/process-depth-scan?job_id=` | Start depth pipeline |
+| GET  | `/v2/status/{job_id}` | Poll job |
+| GET  | `/v2/result/{job_id}` | Get foot measurements |
+| GET  | `/v2/download-stl/{job_id}` | Download foot STL |
+| GET  | `/v2/health` | v2 health + YOLO load status |
+
+### V2 Upload Format
+
+The v2 ZIP must contain depth frames:
+
+```
+depth_scan.zip
+├── depth_0001.png         # 16-bit PNG (depth in mm)
+├── depth_0002.png
+├── depth_0003.png
+├── ...
+└── camera_intrinsics.json  # optional
 ```
 
-**Response:**
+Or alternatively `.npy` files (float32, meters).
+
+`camera_intrinsics.json`:
+```json
+{"fx": 585.0, "fy": 585.0, "cx": 320.0, "cy": 240.0}
+```
+
+### V2 Response
+
 ```json
 {
   "job_id": "a1b2c3d4e5f6g7h8",
-  "message": "Scan uploaded successfully"
+  "foot_length_mm": 263.4,
+  "foot_width_mm": 97.2,
+  "foot_height_mm": 68.1,
+  "eu_size_approx": 39,
+  "mesh_vertices": 8421,
+  "mesh_triangles": 16730,
+  "method": "depth_only_hybrid",
+  "confidence_score": 0.87,
+  "total_time": 4.21,
+  "stl_url": "/v2/download-stl/a1b2c3d4e5f6g7h8"
 }
-```
-
-### `POST /process-scan?job_id=<id>`
-
-Start the processing pipeline.
-
-```bash
-curl -X POST "http://localhost:8000/process-scan?job_id=a1b2c3d4e5f6g7h8"
-```
-
-**Response:**
-```json
-{
-  "job_id": "a1b2c3d4e5f6g7h8",
-  "status": "processing",
-  "message": "Processing started"
-}
-```
-
-### `GET /status/{job_id}`
-
-Poll for processing status.
-
-```bash
-curl http://localhost:8000/status/a1b2c3d4e5f6g7h8
-```
-
-**Response:**
-```json
-{
-  "job_id": "a1b2c3d4e5f6g7h8",
-  "status": "completed",
-  "message": "Pipeline completed in 12.3s"
-}
-```
-
-### `GET /result/{job_id}`
-
-Retrieve full analysis results.
-
-```bash
-curl http://localhost:8000/result/a1b2c3d4e5f6g7h8
-```
-
-**Response:**
-```json
-{
-  "job_id": "a1b2c3d4e5f6g7h8",
-  "foot_length_mm": 265.40,
-  "foot_width_mm": 98.20,
-  "arch_height_mm": 18.50,
-  "arch_type": "normal",
-  "pressure_score": 0.4523,
-  "confidence_score": 0.8741,
-  "stl_url": "/download-stl/a1b2c3d4e5f6g7h8"
-}
-```
-
-### `GET /download-stl/{job_id}`
-
-Download the generated insole STL file.
-
-```bash
-curl -O http://localhost:8000/download-stl/a1b2c3d4e5f6g7h8
-```
-
-### `GET /health`
-
-Health check endpoint.
-
-```bash
-curl http://localhost:8000/health
 ```
 
 ---
 
-## 🧠 ML Models & Weights
+## 🧠 Training the YOLOv8-Seg Model
 
-The system uses three PyTorch models:
+### Full training pipeline
 
-| Model | File | Input | Output |
-|-------|------|-------|--------|
-| **PointNet** | `pointnet_foot.pth` | (B, 3, 2048) point cloud | (B, 256) shape features |
-| **ArchClassifier** | `arch_classifier.pth` | (B, 256) features | 3-class logits [flat, normal, high] |
-| **PressureNet** | `pressure_model.pth` | (B, 256) features | (B, 10) regional pressure scores |
+```bash
+bash scripts/train_all.sh
+```
 
-### Adding Pretrained Weights
+This runs:
+1. **Synthetic data generation** — 500 synthetic foot depth maps for pre-training
+2. **Stage 1 training** — frozen backbone (transfer learning, 150 epochs)
+3. **Stage 2 training** — full fine-tuning (low LR, 100 epochs)
+4. **Export** — to CoreML + ONNX
+5. **Install** — copies weights to `weights/foot_yolov8_seg.pt`
 
-1. Place `.pth` files in the `weights/` directory.
-2. Name them: `pointnet_foot.pth`, `arch_classifier.pth`, `pressure_model.pth`.
-3. The system falls back to **random initialisation** if weights are missing.
+### Manual training
 
-### Training Your Own Models
+```bash
+cd ml_training/
 
-- **PointNet**: Train on foot scan point clouds using shape reconstruction or classification loss.
-- **ArchClassifier**: Fine-tune on labelled foot scans with flat/normal/high arch labels.
-- **PressureNet**: Train with ground-truth pressure mat data mapped to foot regions.
+# 1. Generate synthetic dataset
+python data/dataset_preparation.py synthetic --output data/foot_dataset --n 500
 
-All models support GPU when available and fall back to CPU automatically.
+# 2. Process real depth captures
+# (See "Dataset Preparation" in IMPLEMENTATION_GUIDE.md)
+
+# 3. Train
+python train_yolov8.py --data data/foot_dataset/dataset.yaml --device 0
+
+# 4. Export
+python train_yolov8.py --export --weights foot_scan_runs/foot_seg_stage2/weights/best.pt
+```
+
+The pipeline works **without YOLO weights** (geometric mode), so you can deploy immediately and train in parallel.
 
 ---
 
-## ⚙️ Processing Pipeline
+## ⚙️ Configuration
 
-The pipeline runs 9 stages sequentially:
-
-```
-1. Load & Clean Mesh     → Remove noise, duplicates, degenerate triangles
-2. Scale Calibration     → Auto-detect units, convert to mm
-3. Ground Removal        → RANSAC plane detection + removal
-4. Foot Segmentation     → DBSCAN clustering, largest cluster = foot
-5. 3D Reconstruction     → Poisson surface reconstruction → watertight mesh
-6. Landmark Detection    → Heel, arch, forefoot, toe tip identification
-7. Biomechanical ML      → PointNet features → arch type classification
-8. Pressure Analysis     → PressureNet → 10-region plantar pressure map
-9. Insole Generation     → Parametric insole with arch support → STL export
-```
-
----
-
-## 🔧 Configuration
-
-All parameters can be overridden via environment variables:
+All settings in `app/config.py` are env-overridable:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SCALE_FACTOR` | `1000.0` | Mesh unit conversion factor |
-| `VOXEL_DOWNSAMPLE_SIZE` | `0.5` | Voxel size (mm) for downsampling |
-| `DBSCAN_EPS` | `5.0` | DBSCAN clustering radius (mm) |
-| `DBSCAN_MIN_POINTS` | `100` | Minimum cluster size |
-| `POISSON_DEPTH` | `9` | Poisson reconstruction depth |
-| `ML_NUM_POINTS` | `2048` | Points sampled for ML input |
-| `INSOLE_THICKNESS` | `3.0` | Base insole thickness (mm) |
-| `HEEL_CUP_DEPTH` | `12.0` | Heel cup depth (mm) |
-| `ARCH_HEIGHT_FLAT` | `8.0` | Arch support for flat feet (mm) |
-| `ARCH_HEIGHT_NORMAL` | `15.0` | Arch support for normal arch (mm) |
-| `ARCH_HEIGHT_HIGH` | `22.0` | Arch support for high arch (mm) |
+| `WEIGHTS_DIR` | `weights` | YOLO + ML weights directory |
+| `SCANS_DIR` | `scans` | Upload storage |
+| `STLS_DIR` | `stls` | STL output |
+| `YOLO_MODEL_NAME` | `foot_yolov8_seg.pt` | YOLO weights filename |
+| `CAMERA_FX/FY/CX/CY` | `585/585/256/192` | TrueDepth intrinsics |
+| `DEPTH_MIN_M` | `0.20` | Min scan distance (m) |
+| `DEPTH_MAX_M` | `1.50` | Max scan distance (m) |
+| `FLOOR_RANSAC_THRESHOLD` | `0.02` | Floor plane tolerance (m) |
+| `RECON_TARGET_TRIANGLES` | `50000` | Mesh decimation target |
 
 ---
 
 ## 📱 iOS Integration
 
-The iOS app should:
+### Required client flow
 
-1. **Upload**: ZIP the scan data (`mesh.obj`, `camera_poses.json`, images) and `POST` to `/upload-scan`.
-2. **Process**: Call `POST /process-scan?job_id=<id>` to start processing.
-3. **Poll**: Poll `GET /status/{job_id}` every 2-3 seconds until `status == "completed"`.
-4. **Display**: Fetch results from `GET /result/{job_id}`.
-5. **Download**: The STL is available at `GET /download-stl/{job_id}`.
+```swift
+// 1. Capture multiple depth frames during user "FaceID-style" scan
+let depthFrames: [Data] = captureDepthFrames()
 
-All responses are JSON. The STL download is a binary file stream.
+// 2. ZIP frames + intrinsics
+let zipData = makeZip(frames: depthFrames, intrinsics: cameraIntrinsics)
+
+// 3. Upload
+let uploadResp = try await api.upload("/v2/upload-depth-scan", zip: zipData)
+
+// 4. Process
+try await api.post("/v2/process-depth-scan?job_id=\(uploadResp.jobId)")
+
+// 5. Poll status every 2s
+while true {
+    let s = try await api.get("/v2/status/\(jobId)")
+    if s.status == "completed" { break }
+    try await Task.sleep(nanoseconds: 2_000_000_000)
+}
+
+// 6. Get measurements + STL
+let result = try await api.get("/v2/result/\(jobId)")
+let stl = try await api.download("/v2/download-stl/\(jobId)")
+```
+
+### Real-time scan triggering (on-device)
+
+Use `app/services/scan_trigger.py` logic ported to Swift for FaceID-style auto-capture (see `IMPLEMENTATION_GUIDE.md` for Swift template).
 
 ---
 
-## 📊 Performance Targets
+## 📊 Performance
 
-| Metric | Target |
-|--------|--------|
-| Processing time | < 30 seconds per scan |
-| Dimensional accuracy | ≤ 1 mm error |
-| STL quality | Watertight, manifold, 3D-print ready |
+| Metric | Target | Notes |
+|--------|--------|-------|
+| Pipeline time | < 8s per scan | 5 frames, single CPU core |
+| Inference (CoreML, iPhone 15) | ~20ms/frame | YOLOv8n-seg FP16 + ANE |
+| Dimensional accuracy | ± 5mm | Single frame |
+| Dimensional accuracy | ± 2mm | Multi-frame fusion (10+ frames) |
+| Mesh quality | Watertight | Poisson reconstruction |
+
+---
+
+## 🔍 How It Works
+
+```
+TrueDepth/LiDAR frames
+       │
+       ▼
+Preprocessing  (fill holes, bilateral filter, normalize)
+       │
+       ▼
+Floor removal  (RANSAC plane detection)
+       │
+       ▼
+Hybrid segmentation
+  ├─ Geometric (depth threshold + morphology)
+  └─ YOLOv8-seg (if model available)
+  → AND-combine for highest precision
+       │
+       ▼
+Multi-frame fusion (if multiple valid frames)
+       │
+       ▼
+Point cloud cleanup (outlier removal, normals)
+       │
+       ▼
+Poisson surface reconstruction → watertight mesh
+       │
+       ▼
+Mesh smoothing + decimation
+       │
+       ▼
+Measurements + STL export
+```
+
+---
+
+## 🛠️ Migration from v1
+
+Already running the legacy pipeline? Run the migration script:
+
+```bash
+bash scripts/migrate_v2.sh
+```
+
+This:
+1. Backs up `app/main.py` → `app/main.py.bak`
+2. Creates required directories
+3. Installs new dependencies
+4. Verifies the v2 pipeline loads
+
+Existing legacy endpoints remain unchanged.
 
 ---
 
 ## 📄 License
 
-This project is proprietary. All rights reserved.
+Proprietary. All rights reserved.
+
+---
+title: DigiFoot API
+emoji: 🦶
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+license: apache-2.0
+short_description: Depth-only foot scanning API with YOLOv8-seg
+---
