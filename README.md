@@ -1,10 +1,21 @@
-# 🦶 DigiFoot Backend — v2.0
+﻿---
+title: DigiFoot API
+emoji: 🦶
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+license: apache-2.0
+short_description: Depth-only foot scanning API with YOLOv8-seg
+---
+# ðŸ¦¶ DigiFoot Backend â€” v2.0
 
 > **Production-ready FastAPI backend** combining the legacy orthopedic insole pipeline with the new **depth-only foot scanning v2 pipeline** powered by iPhone TrueDepth / LiDAR + YOLOv8-seg.
 
 ---
 
-## 🆕 What's New in v2
+## ðŸ†• What's New in v2
 
 - **Depth-only foot scanning**: no RGB images required
 - **Hybrid segmentation**: geometric (RANSAC + morphology) + YOLOv8-seg refinement
@@ -15,79 +26,79 @@
 
 ---
 
-## 📁 Project Structure
+## ðŸ“ Project Structure
 
 ```
 backend/
-├── app/
-│   ├── main.py                       # FastAPI entry (legacy + v2)
-│   ├── config.py                     # Central settings
-│   ├── routes/
-│   │   ├── upload.py                 # legacy
-│   │   ├── process.py                # legacy
-│   │   ├── result.py                 # legacy
-│   │   ├── download.py               # legacy
-│   │   └── v2_scan.py                # ★ NEW depth-only endpoints
-│   ├── schemas/
-│   │   ├── response_schema.py        # legacy
-│   │   └── v2_schemas.py             # ★ NEW Pydantic v2 models
-│   ├── services/
-│   │   ├── pipeline.py               # legacy mesh pipeline
-│   │   ├── (existing legacy services)
-│   │   ├── depth_pipeline.py         # ★ NEW orchestrator
-│   │   ├── depth_preprocessing.py    # ★ NEW depth filter/clean
-│   │   ├── foot_segmentation.py      # ★ NEW geometric + YOLO seg
-│   │   └── scan_trigger.py           # ★ NEW real-time triggering
-│   ├── recon/
-│   │   ├── pipeline.py               # (existing recon code)
-│   │   ├── measurements.py           # (existing)
-│   │   ├── ml_refine.py              # (existing)
-│   │   ├── obj_writer.py             # (existing)
-│   │   ├── uv_bake.py                # (existing)
-│   │   └── reconstruction_3d.py      # ★ NEW Poisson fusion + measure
-│   ├── ml/
-│   │   ├── pointnet_model.py         # (existing)
-│   │   ├── pointnet2_model.py        # (existing)
-│   │   ├── arch_classifier.py        # (existing)
-│   │   ├── pressure_model.py         # (existing)
-│   │   ├── model_loader.py           # (existing)
-│   │   └── yolo_seg_model.py         # ★ NEW YOLO singleton
-│   └── utils/
-│       └── (existing helpers)
-│
-├── ml_training/
-│   ├── data/
-│   │   ├── dataset.py                # (existing)
-│   │   ├── synthetic_gen.py          # (existing)
-│   │   └── dataset_preparation.py    # ★ NEW depth dataset builder
-│   ├── train.py                      # (existing)
-│   ├── train_yolov8.py               # ★ NEW YOLOv8-seg 2-stage trainer
-│   └── eval.py                       # (existing)
-│
-├── scripts/
-│   ├── migrate_v2.sh                 # ★ migrate legacy → v2
-│   ├── setup_deps.sh                 # one-shot setup
-│   ├── train_all.sh                  # full training pipeline
-│   └── export_coreml.py              # ★ CoreML export for iOS
-│
-├── weights/                          # ML model weights (.pt, .pth)
-├── scans/                            # uploaded scan dirs (per job_id)
-├── stls/                             # generated STL output
-├── outputs/                          # intermediate artifacts
-├── validation_set/                   # holdout validation data
-│
-├── requirements.txt                  # merged dependencies
-├── Dockerfile
-├── .dockerignore
-├── test_e2e.py                       # ★ v2 endpoint integration test
-└── README.md
+â”œâ”€â”€ app/
+â”‚   â”œâ”€â”€ main.py                       # FastAPI entry (legacy + v2)
+â”‚   â”œâ”€â”€ config.py                     # Central settings
+â”‚   â”œâ”€â”€ routes/
+â”‚   â”‚   â”œâ”€â”€ upload.py                 # legacy
+â”‚   â”‚   â”œâ”€â”€ process.py                # legacy
+â”‚   â”‚   â”œâ”€â”€ result.py                 # legacy
+â”‚   â”‚   â”œâ”€â”€ download.py               # legacy
+â”‚   â”‚   â””â”€â”€ v2_scan.py                # â˜… NEW depth-only endpoints
+â”‚   â”œâ”€â”€ schemas/
+â”‚   â”‚   â”œâ”€â”€ response_schema.py        # legacy
+â”‚   â”‚   â””â”€â”€ v2_schemas.py             # â˜… NEW Pydantic v2 models
+â”‚   â”œâ”€â”€ services/
+â”‚   â”‚   â”œâ”€â”€ pipeline.py               # legacy mesh pipeline
+â”‚   â”‚   â”œâ”€â”€ (existing legacy services)
+â”‚   â”‚   â”œâ”€â”€ depth_pipeline.py         # â˜… NEW orchestrator
+â”‚   â”‚   â”œâ”€â”€ depth_preprocessing.py    # â˜… NEW depth filter/clean
+â”‚   â”‚   â”œâ”€â”€ foot_segmentation.py      # â˜… NEW geometric + YOLO seg
+â”‚   â”‚   â””â”€â”€ scan_trigger.py           # â˜… NEW real-time triggering
+â”‚   â”œâ”€â”€ recon/
+â”‚   â”‚   â”œâ”€â”€ pipeline.py               # (existing recon code)
+â”‚   â”‚   â”œâ”€â”€ measurements.py           # (existing)
+â”‚   â”‚   â”œâ”€â”€ ml_refine.py              # (existing)
+â”‚   â”‚   â”œâ”€â”€ obj_writer.py             # (existing)
+â”‚   â”‚   â”œâ”€â”€ uv_bake.py                # (existing)
+â”‚   â”‚   â””â”€â”€ reconstruction_3d.py      # â˜… NEW Poisson fusion + measure
+â”‚   â”œâ”€â”€ ml/
+â”‚   â”‚   â”œâ”€â”€ pointnet_model.py         # (existing)
+â”‚   â”‚   â”œâ”€â”€ pointnet2_model.py        # (existing)
+â”‚   â”‚   â”œâ”€â”€ arch_classifier.py        # (existing)
+â”‚   â”‚   â”œâ”€â”€ pressure_model.py         # (existing)
+â”‚   â”‚   â”œâ”€â”€ model_loader.py           # (existing)
+â”‚   â”‚   â””â”€â”€ yolo_seg_model.py         # â˜… NEW YOLO singleton
+â”‚   â””â”€â”€ utils/
+â”‚       â””â”€â”€ (existing helpers)
+â”‚
+â”œâ”€â”€ ml_training/
+â”‚   â”œâ”€â”€ data/
+â”‚   â”‚   â”œâ”€â”€ dataset.py                # (existing)
+â”‚   â”‚   â”œâ”€â”€ synthetic_gen.py          # (existing)
+â”‚   â”‚   â””â”€â”€ dataset_preparation.py    # â˜… NEW depth dataset builder
+â”‚   â”œâ”€â”€ train.py                      # (existing)
+â”‚   â”œâ”€â”€ train_yolov8.py               # â˜… NEW YOLOv8-seg 2-stage trainer
+â”‚   â””â”€â”€ eval.py                       # (existing)
+â”‚
+â”œâ”€â”€ scripts/
+â”‚   â”œâ”€â”€ migrate_v2.sh                 # â˜… migrate legacy â†’ v2
+â”‚   â”œâ”€â”€ setup_deps.sh                 # one-shot setup
+â”‚   â”œâ”€â”€ train_all.sh                  # full training pipeline
+â”‚   â””â”€â”€ export_coreml.py              # â˜… CoreML export for iOS
+â”‚
+â”œâ”€â”€ weights/                          # ML model weights (.pt, .pth)
+â”œâ”€â”€ scans/                            # uploaded scan dirs (per job_id)
+â”œâ”€â”€ stls/                             # generated STL output
+â”œâ”€â”€ outputs/                          # intermediate artifacts
+â”œâ”€â”€ validation_set/                   # holdout validation data
+â”‚
+â”œâ”€â”€ requirements.txt                  # merged dependencies
+â”œâ”€â”€ Dockerfile
+â”œâ”€â”€ .dockerignore
+â”œâ”€â”€ test_e2e.py                       # â˜… v2 endpoint integration test
+â””â”€â”€ README.md
 ```
 
-★ = added by v2 migration
+â˜… = added by v2 migration
 
 ---
 
-## 🚀 Quick Start
+## ðŸš€ Quick Start
 
 ### 1. Setup
 
@@ -112,7 +123,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 - Swagger UI: http://localhost:8000/docs
 - ReDoc:      http://localhost:8000/redoc
 
-### 3. Test v2 pipeline (synthetic data — no real scans needed)
+### 3. Test v2 pipeline (synthetic data â€” no real scans needed)
 
 ```bash
 python test_e2e.py
@@ -120,7 +131,7 @@ python test_e2e.py
 
 ---
 
-## 🐳 Docker
+## ðŸ³ Docker
 
 ```bash
 docker build -t digifoot-backend .
@@ -136,7 +147,7 @@ docker run -d \
 
 ---
 
-## 🔌 API Endpoints
+## ðŸ”Œ API Endpoints
 
 ### Legacy (mesh-based orthopedic pipeline)
 
@@ -165,11 +176,11 @@ The v2 ZIP must contain depth frames:
 
 ```
 depth_scan.zip
-├── depth_0001.png         # 16-bit PNG (depth in mm)
-├── depth_0002.png
-├── depth_0003.png
-├── ...
-└── camera_intrinsics.json  # optional
+â”œâ”€â”€ depth_0001.png         # 16-bit PNG (depth in mm)
+â”œâ”€â”€ depth_0002.png
+â”œâ”€â”€ depth_0003.png
+â”œâ”€â”€ ...
+â””â”€â”€ camera_intrinsics.json  # optional
 ```
 
 Or alternatively `.npy` files (float32, meters).
@@ -199,7 +210,7 @@ Or alternatively `.npy` files (float32, meters).
 
 ---
 
-## 🧠 Training the YOLOv8-Seg Model
+## ðŸ§  Training the YOLOv8-Seg Model
 
 ### Full training pipeline
 
@@ -208,11 +219,11 @@ bash scripts/train_all.sh
 ```
 
 This runs:
-1. **Synthetic data generation** — 500 synthetic foot depth maps for pre-training
-2. **Stage 1 training** — frozen backbone (transfer learning, 150 epochs)
-3. **Stage 2 training** — full fine-tuning (low LR, 100 epochs)
-4. **Export** — to CoreML + ONNX
-5. **Install** — copies weights to `weights/foot_yolov8_seg.pt`
+1. **Synthetic data generation** â€” 500 synthetic foot depth maps for pre-training
+2. **Stage 1 training** â€” frozen backbone (transfer learning, 150 epochs)
+3. **Stage 2 training** â€” full fine-tuning (low LR, 100 epochs)
+4. **Export** â€” to CoreML + ONNX
+5. **Install** â€” copies weights to `weights/foot_yolov8_seg.pt`
 
 ### Manual training
 
@@ -236,7 +247,7 @@ The pipeline works **without YOLO weights** (geometric mode), so you can deploy 
 
 ---
 
-## ⚙️ Configuration
+## âš™ï¸ Configuration
 
 All settings in `app/config.py` are env-overridable:
 
@@ -254,7 +265,7 @@ All settings in `app/config.py` are env-overridable:
 
 ---
 
-## 📱 iOS Integration
+## ðŸ“± iOS Integration
 
 ### Required client flow
 
@@ -289,54 +300,54 @@ Use `app/services/scan_trigger.py` logic ported to Swift for FaceID-style auto-c
 
 ---
 
-## 📊 Performance
+## ðŸ“Š Performance
 
 | Metric | Target | Notes |
 |--------|--------|-------|
 | Pipeline time | < 8s per scan | 5 frames, single CPU core |
 | Inference (CoreML, iPhone 15) | ~20ms/frame | YOLOv8n-seg FP16 + ANE |
-| Dimensional accuracy | ± 5mm | Single frame |
-| Dimensional accuracy | ± 2mm | Multi-frame fusion (10+ frames) |
+| Dimensional accuracy | Â± 5mm | Single frame |
+| Dimensional accuracy | Â± 2mm | Multi-frame fusion (10+ frames) |
 | Mesh quality | Watertight | Poisson reconstruction |
 
 ---
 
-## 🔍 How It Works
+## ðŸ” How It Works
 
 ```
 TrueDepth/LiDAR frames
-       │
-       ▼
+       â”‚
+       â–¼
 Preprocessing  (fill holes, bilateral filter, normalize)
-       │
-       ▼
+       â”‚
+       â–¼
 Floor removal  (RANSAC plane detection)
-       │
-       ▼
+       â”‚
+       â–¼
 Hybrid segmentation
-  ├─ Geometric (depth threshold + morphology)
-  └─ YOLOv8-seg (if model available)
-  → AND-combine for highest precision
-       │
-       ▼
+  â”œâ”€ Geometric (depth threshold + morphology)
+  â””â”€ YOLOv8-seg (if model available)
+  â†’ AND-combine for highest precision
+       â”‚
+       â–¼
 Multi-frame fusion (if multiple valid frames)
-       │
-       ▼
+       â”‚
+       â–¼
 Point cloud cleanup (outlier removal, normals)
-       │
-       ▼
-Poisson surface reconstruction → watertight mesh
-       │
-       ▼
+       â”‚
+       â–¼
+Poisson surface reconstruction â†’ watertight mesh
+       â”‚
+       â–¼
 Mesh smoothing + decimation
-       │
-       ▼
+       â”‚
+       â–¼
 Measurements + STL export
 ```
 
 ---
 
-## 🛠️ Migration from v1
+## ðŸ› ï¸ Migration from v1
 
 Already running the legacy pipeline? Run the migration script:
 
@@ -345,7 +356,7 @@ bash scripts/migrate_v2.sh
 ```
 
 This:
-1. Backs up `app/main.py` → `app/main.py.bak`
+1. Backs up `app/main.py` â†’ `app/main.py.bak`
 2. Creates required directories
 3. Installs new dependencies
 4. Verifies the v2 pipeline loads
@@ -354,13 +365,13 @@ Existing legacy endpoints remain unchanged.
 
 ---
 
-## 📄 License
+## ðŸ“„ License
 
 Proprietary. All rights reserved.
 
 ---
 title: DigiFoot API
-emoji: 🦶
+emoji: ðŸ¦¶
 colorFrom: blue
 colorTo: indigo
 sdk: docker
