@@ -153,6 +153,36 @@ class DepthFootPipeline:
         return seg
 
     # ------------------------------------------------------------------ #
+    #  STL fallback writer
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _write_ascii_stl(mesh, path: str):
+        """
+        Manual ASCII STL writer — fallback when Open3D's writer fails.
+        STL format: per-triangle facet normal + 3 vertices.
+        """
+        verts = np.asarray(mesh.vertices)
+        tris = np.asarray(mesh.triangles)
+        if len(tris) == 0:
+            raise ValueError("Mesh has no triangles — cannot write STL")
+
+        with open(path, "w") as f:
+            f.write("solid digifoot\n")
+            for t in tris:
+                v0, v1, v2 = verts[t[0]], verts[t[1]], verts[t[2]]
+                n = np.cross(v1 - v0, v2 - v0)
+                ln = np.linalg.norm(n)
+                n = n / ln if ln > 1e-12 else np.array([0.0, 0.0, 1.0])
+                f.write(f"  facet normal {n[0]:.6e} {n[1]:.6e} {n[2]:.6e}\n")
+                f.write("    outer loop\n")
+                for v in (v0, v1, v2):
+                    f.write(f"      vertex {v[0]:.6e} {v[1]:.6e} {v[2]:.6e}\n")
+                f.write("    endloop\n")
+                f.write("  endfacet\n")
+            f.write("endsolid digifoot\n")
+
+    # ------------------------------------------------------------------ #
     #  Full pipeline
     # ------------------------------------------------------------------ #
 
@@ -297,10 +327,30 @@ class DepthFootPipeline:
         result["stages"]["reconstruction"] = {"time": round(time.time() - t0, 2)}
 
         # ── Stage 6: Export STL ─────────────────────────────────────── #
+        # FIX: Open3D's STL writer REQUIRES triangle normals. Without them
+        # the .stl write produces an empty/invalid file → download-stl 404s.
+        # The pipeline was only leaving a _pre.obj behind.
         t0 = time.time()
         Path(stl_out_path).parent.mkdir(parents=True, exist_ok=True)
-        o3d.io.write_triangle_mesh(stl_out_path, mesh)
-        result["stages"]["export"] = {"time": round(time.time() - t0, 2)}
+
+        mesh.compute_vertex_normals()
+        mesh.compute_triangle_normals()   # ← required for STL
+
+        ok = o3d.io.write_triangle_mesh(
+            stl_out_path, mesh, write_triangle_uvs=False
+        )
+        stl_file = Path(stl_out_path)
+        if not ok or not stl_file.exists() or stl_file.stat().st_size == 0:
+            # Last-resort fallback: write ASCII STL via numpy if Open3D failed
+            logger.warning("Open3D STL write failed — using manual ASCII fallback")
+            self._write_ascii_stl(mesh, stl_out_path)
+
+        final_size = Path(stl_out_path).stat().st_size if Path(stl_out_path).exists() else 0
+        logger.info(f"✓ STL written: {stl_out_path} ({final_size:,} bytes)")
+        result["stages"]["export"] = {
+            "time": round(time.time() - t0, 2),
+            "stl_bytes": final_size,
+        }
 
         # ── Stage 7: Measurements ──────────────────────────────────── #
         measurements = self.recon.measure_foot(mesh)
@@ -339,7 +389,7 @@ def get_depth_pipeline() -> DepthFootPipeline:
             weights_dir=getattr(settings, "WEIGHTS_DIR", "weights"),
             fx=getattr(settings, "CAMERA_FX", 585.0),
             fy=getattr(settings, "CAMERA_FY", 585.0),
-            cx=getattr(settings, "CAMERA_CX", 256.0),
-            cy=getattr(settings, "CAMERA_CY", 192.0),
+            cx=getattr(settings, "CAMERA_CX", 320.0),  # FIX: was 256.0
+            cy=getattr(settings, "CAMERA_CY", 240.0),  # FIX: was 192.0
         )
     return _pipeline_instance
