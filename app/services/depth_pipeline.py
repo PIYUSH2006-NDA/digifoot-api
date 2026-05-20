@@ -53,8 +53,8 @@ class DepthFootPipeline:
         yolo_model_name: str = "foot_yolov8_seg.pt",
         fx: float = 585.0,
         fy: float = 585.0,
-        cx: float = 256.0,
-        cy: float = 192.0,
+        cx: float = 320.0,   # FIX: was 256.0 — correct for 640×480 TrueDepth (w/2)
+        cy: float = 240.0,   # FIX: was 192.0 — correct for 640×480 TrueDepth (h/2)
     ):
         self.prep = DepthPreprocessor(fx=fx, fy=fy, cx=cx, cy=cy)
         self.floor = FloorRemover(self.prep)
@@ -80,18 +80,20 @@ class DepthFootPipeline:
     def load_depth_frames(self, scan_dir: str) -> List[np.ndarray]:
         """
         Load all depth frames from a scan directory.
-        Supports: .png (16-bit), .tiff, .npy
+        Supports: .png (16-bit), .tiff, .npy, .bin (raw float32 from iOS bin mode)
         """
         scan_dir = Path(scan_dir)
         frames = []
 
-        # Try standard depth file patterns
-        patterns = ["depth_*.png", "*.depth.png", "frame_*.png", "*.tiff", "*.npy"]
+        # FIX: added .bin pattern — TrueDepthScanScreen uses capture_v7 channel
+        # which writes raw float32 .bin files, not PNGs. Backend was only loading
+        # PNGs → "No frames found" → processing always failed for this scan path.
+        patterns = ["depth_*.png", "*.depth.png", "frame_*.png", "*.tiff", "*.npy",
+                    "depth_*.bin"]  # ← NEW: raw float32 from iOS bin mode
         files = []
         for p in patterns:
             files.extend(scan_dir.rglob(p))
 
-        # Deduplicate and sort
         files = sorted(set(files))
 
         for f in files:
@@ -101,6 +103,19 @@ class DepthFootPipeline:
                     if arr.dtype != np.float32:
                         arr = arr.astype(np.float32) / self.prep.depth_scale
                     frames.append(arr)
+
+                elif f.suffix == ".bin":
+                    # Raw float32 depth. Matching .txt holds "{w},{h},float32"
+                    txt = f.with_suffix(".txt")
+                    if txt.exists():
+                        dims = txt.read_text().strip().split(",")
+                        w_d, h_d = int(dims[0]), int(dims[1])
+                        arr = np.frombuffer(f.read_bytes(), dtype=np.float32).reshape(h_d, w_d)
+                        # Values already in meters (float32) — no scale conversion needed
+                        frames.append(arr)
+                    else:
+                        logger.warning(f"No .txt dims for {f.name} — skipping")
+
                 else:
                     depth = self.prep.load_depth(str(f))
                     frames.append(depth)
@@ -165,6 +180,49 @@ class DepthFootPipeline:
         frames = self.load_depth_frames(scan_dir)
         if not frames:
             raise ValueError(f"No depth frames found in {scan_dir}")
+
+        # FIX: Read actual camera intrinsics from the uploaded zip.
+        # iOS stores calibration in camera_intrinsics.json (png16 mode)
+        # OR in meta.json (bin mode, after v7.8+ fix).
+        # Pipeline was using hardcoded defaults (cx=256, cy=192 = wrong for
+        # 640×480) — this caused skewed/distorted 3D reconstruction.
+        intr_path = Path(scan_dir) / "camera_intrinsics.json"
+        meta_path = Path(scan_dir) / "meta.json"
+        if intr_path.exists():
+            try:
+                with open(intr_path) as f:
+                    intr = json.load(f)
+                self.prep.fx = float(intr.get("fx", self.prep.fx))
+                self.prep.fy = float(intr.get("fy", self.prep.fy))
+                self.prep.cx = float(intr.get("cx", self.prep.cx))
+                self.prep.cy = float(intr.get("cy", self.prep.cy))
+                logger.info(f"✓ Intrinsics from camera_intrinsics.json: "
+                            f"fx={self.prep.fx:.1f} fy={self.prep.fy:.1f} "
+                            f"cx={self.prep.cx:.1f} cy={self.prep.cy:.1f}")
+            except Exception as e:
+                logger.warning(f"⚠ Could not read camera_intrinsics.json: {e}")
+        elif meta_path.exists():
+            # Bin mode: intrinsics stored in meta.json (v7.8+)
+            try:
+                with open(meta_path) as f:
+                    meta = json.load(f)
+                if "fx" in meta:
+                    self.prep.fx = float(meta["fx"])
+                    self.prep.fy = float(meta.get("fy", meta["fx"]))
+                    self.prep.cx = float(meta.get("cx", self.prep.cx))
+                    self.prep.cy = float(meta.get("cy", self.prep.cy))
+                    logger.info(f"✓ Intrinsics from meta.json: "
+                                f"fx={self.prep.fx:.1f} fy={self.prep.fy:.1f} "
+                                f"cx={self.prep.cx:.1f} cy={self.prep.cy:.1f}")
+                else:
+                    logger.info("ℹ meta.json has no intrinsics (pre-v7.8) — using defaults")
+            except Exception as e:
+                logger.warning(f"⚠ Could not read meta.json intrinsics: {e}")
+        else:
+            logger.info(f"ℹ No intrinsics file found — using defaults "
+                        f"fx={self.prep.fx} fy={self.prep.fy} "
+                        f"cx={self.prep.cx} cy={self.prep.cy}")
+
         result["stages"]["load"] = {"frames": len(frames), "time": round(time.time() - t0, 2)}
 
         # ── Stage 2-4: Per-frame segmentation ───────────────────────── #
