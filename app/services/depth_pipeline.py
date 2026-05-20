@@ -225,12 +225,28 @@ class DepthFootPipeline:
 
         result["stages"]["load"] = {"frames": len(frames), "time": round(time.time() - t0, 2)}
 
+        # FIX: HF free tier has 2 vCPU — processing 57 frames with RANSAC +
+        # inpaint per frame can exceed the request/background timeout.
+        # Sample at most 18 frames evenly. More than that adds little (foot
+        # barely moves between frames) but costs a lot of CPU time.
+        MAX_FRAMES = 18
+        if len(frames) > MAX_FRAMES:
+            idx = np.linspace(0, len(frames) - 1, MAX_FRAMES).astype(int)
+            frames = [frames[i] for i in idx]
+            logger.info(f"Sampled {MAX_FRAMES} frames (from original set) for processing")
+
         # ── Stage 2-4: Per-frame segmentation ───────────────────────── #
         t0 = time.time()
         valid_frames = []
         valid_masks = []
+        seg_fail_reasons = []
         for i, depth in enumerate(frames):
-            seg = self.process_single_frame(depth)
+            try:
+                seg = self.process_single_frame(depth)
+            except Exception as e:
+                logger.warning(f"Frame {i+1}: segmentation error — {e}")
+                seg_fail_reasons.append(str(e))
+                continue
             if seg["valid"]:
                 valid_frames.append(seg["depth_isolated"])
                 valid_masks.append(seg["mask"])
@@ -239,7 +255,19 @@ class DepthFootPipeline:
                 logger.info(f"Frame {i+1}/{len(frames)}: ✗ no foot found")
 
         if not valid_frames:
-            raise ValueError("No frames contained a valid foot")
+            # Detailed diagnostics instead of a bare ValueError
+            depth_stats = []
+            for d in frames[:3]:
+                v = d[~np.isnan(d) & (d > 0)]
+                if v.size:
+                    depth_stats.append(f"min={v.min():.2f} max={v.max():.2f} "
+                                       f"med={np.median(v):.2f} n={v.size}")
+            raise ValueError(
+                f"No frames contained a valid foot. "
+                f"Processed {len(frames)} frames. "
+                f"Sample depth stats: {depth_stats}. "
+                f"Errors: {seg_fail_reasons[:3]}"
+            )
 
         result["stages"]["segmentation"] = {
             "valid_frames": len(valid_frames),

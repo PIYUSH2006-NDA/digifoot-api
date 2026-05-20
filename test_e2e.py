@@ -24,7 +24,7 @@ import numpy as np
 import cv2
 import requests
 
-API = os.getenv("API_URL", "http://localhost:8000")
+API = os.getenv("API_URL", "https://dummy005-digifoot-api.hf.space")
 SYNTHETIC_FRAMES = 5  # number of frames to generate
 
 

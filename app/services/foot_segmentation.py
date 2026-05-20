@@ -122,22 +122,103 @@ class FootDepthSegmenter:
     def isolate_foot(self, depth: np.ndarray) -> dict:
         """
         Full geometric foot isolation pipeline.
-        Returns dict: depth_isolated, mask, contours, valid, depth_no_floor
-        """
-        # Remove floor + out-of-range depth
-        depth_nf = self.floor.remove_floor_from_depth(depth)
-        depth_nf = self.floor.height_threshold_removal(depth_nf)
 
-        # Threshold mask + morphological cleanup
-        mask = self.depth_threshold_mask(depth_nf)
+        REWRITTEN (v7.9): uses robust nearest-depth-band isolation instead of
+        the fragile RANSAC-floor + aspect-filter chain.
+
+        ROOT CAUSE of "No frames contained a valid foot":
+          1. remove_floor_from_depth had a sign-ambiguity bug — RANSAC plane
+             normal direction is arbitrary, so the foot was sometimes deleted
+             as "floor" while the floor was kept.
+          2. largest_blob then picked the floor; aspect_ratio_filter rejected
+             it → valid=False on every frame.
+
+        New approach: a foot scanned from above is the NEAREST surface to the
+        camera. Find the nearest depth cluster via histogram, keep a band
+        ~14 cm deep. That band IS the foot. No RANSAC, no sign ambiguity.
+        """
+        return self.isolate_foot_robust(depth)
+
+    def isolate_foot_robust(self, depth: np.ndarray,
+                            foot_depth_band: float = 0.14) -> dict:
+        """
+        Robust foot isolation via nearest-depth-cluster banding.
+
+        Args:
+            depth:           float32 depth map in meters (NaN = invalid)
+            foot_depth_band: depth thickness of foot region (m). A foot viewed
+                             from above spans ~12-15 cm front-to-back in depth.
+        """
+        empty = {
+            "depth_isolated": np.full_like(depth, np.nan),
+            "mask": np.zeros(depth.shape, dtype=np.uint8),
+            "contours": [],
+            "depth_no_floor": depth,
+            "valid": False,
+        }
+
+        valid_vals = depth[~np.isnan(depth) & (depth > 0.10) & (depth < 1.50)]
+        if valid_vals.size < 500:
+            return empty
+
+        # Histogram over valid depths — find the NEAREST significant cluster
+        hist, edges = np.histogram(valid_vals, bins=60)
+        peak_max = hist.max()
+        if peak_max == 0:
+            return empty
+        # First bin (nearest to camera) with significant pixel count
+        significant = hist > (peak_max * 0.12)
+        first_sig = int(np.argmax(significant))
+        peak_depth = float(edges[first_sig])
+
+        # Foot occupies a band starting slightly before the nearest cluster
+        z_near = peak_depth - 0.02
+        z_far = peak_depth + foot_depth_band
+
+        mask = ((depth >= z_near) & (depth <= z_far)
+                & ~np.isnan(depth)).astype(np.uint8) * 255
+
+        # Morphological cleanup + keep largest component
         mask = self.morphological_clean(mask)
         mask = self.largest_blob(mask)
 
-        # Validate shape + size
+        # LENIENT validation — iOS FootDetectorV7 already confirmed it's a
+        # foot before upload. Only reject obviously-wrong blobs.
+        foot_area = int((mask > 0).sum())
+        total = mask.shape[0] * mask.shape[1]
+        frac = foot_area / total
+        if frac < 0.008 or frac > 0.75:
+            # Too tiny (noise) or almost-whole-frame (floor leak)
+            return empty
+
+        depth_isolated = depth.copy()
+        depth_isolated[mask == 0] = np.nan
+        contours = self.extract_contours(mask)
+
+        return {
+            "depth_isolated": depth_isolated,
+            "mask": mask,
+            "contours": contours,
+            "depth_no_floor": depth_isolated,
+            "valid": True,
+            "peak_depth": peak_depth,
+            "foot_area_frac": frac,
+        }
+
+    def isolate_foot_legacy(self, depth: np.ndarray) -> dict:
+        """
+        Original RANSAC-floor isolation. Kept for reference / fallback.
+        Not used — see isolate_foot_robust (the sign-ambiguity bug made this
+        unreliable).
+        """
+        depth_nf = self.floor.remove_floor_from_depth(depth)
+        depth_nf = self.floor.height_threshold_removal(depth_nf)
+        mask = self.depth_threshold_mask(depth_nf)
+        mask = self.morphological_clean(mask)
+        mask = self.largest_blob(mask)
         mask = self.size_filter(mask) or mask
         valid_mask = self.aspect_ratio_filter(mask)
 
-        # Apply mask to depth
         depth_isolated = depth.copy()
         if valid_mask is not None:
             depth_isolated[valid_mask == 0] = np.nan

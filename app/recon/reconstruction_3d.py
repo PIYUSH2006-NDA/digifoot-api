@@ -253,10 +253,15 @@ class FootReconstructor:
         print(f"  [1/6] Depth → PointCloud")
         pcd = self.depth_to_pcd(depth_isolated, colorize=True)
         print(f"        {len(pcd.points)} raw points")
+        if len(pcd.points) < 100:
+            raise ValueError(f"Too few 3D points ({len(pcd.points)}) — "
+                             f"depth frame had almost no valid foot pixels")
 
         print(f"  [2/6] Cleaning outliers")
         pcd = self.clean_pcd(pcd)
         print(f"        {len(pcd.points)} clean points")
+        if len(pcd.points) < 50:
+            raise ValueError(f"Too few points after cleaning ({len(pcd.points)})")
 
         print(f"  [3/6] Estimating normals")
         pcd = self.estimate_normals(pcd)
@@ -264,12 +269,22 @@ class FootReconstructor:
         print(f"  [4/6] Surface reconstruction ({method})")
         if method == "poisson":
             mesh = self.reconstruct_poisson(pcd)
+            # Poisson can return an empty mesh on sparse/partial clouds.
+            # Fall back to ball-pivoting which handles open surfaces better.
+            if len(mesh.triangles) < 50:
+                print(f"        Poisson gave {len(mesh.triangles)} tris — "
+                      f"falling back to ball-pivoting")
+                mesh = self.reconstruct_ball_pivot(pcd)
         elif method == "ball_pivot":
             mesh = self.reconstruct_ball_pivot(pcd)
         elif method == "alpha_shape":
             mesh = self.reconstruct_alpha_shape(pcd)
         else:
             raise ValueError(f"Unknown method: {method}")
+
+        if len(mesh.triangles) < 10:
+            raise ValueError(f"Reconstruction produced an empty mesh "
+                             f"({len(mesh.triangles)} triangles)")
 
         print(f"  [5/6] Smoothing + simplification")
         mesh = self.smooth_mesh(mesh)
@@ -313,6 +328,9 @@ class FootReconstructor:
             print(f"  Frame {i+1}: {len(pcd_i.points)} pts")
 
         print(f"  Total before fusion downsample: {len(combined.points)}")
+        if len(combined.points) < 100:
+            raise ValueError(f"Fused cloud too sparse ({len(combined.points)} pts) "
+                             f"— foot segmentation isolated almost nothing")
         combined = combined.voxel_down_sample(voxel_size)
         print(f"  After voxel merge: {len(combined.points)}")
         combined = self.estimate_normals(combined)
@@ -320,8 +338,15 @@ class FootReconstructor:
         print("  Reconstructing fused mesh...")
         if method == "poisson":
             mesh = self.reconstruct_poisson(combined, depth=10)
+            if len(mesh.triangles) < 50:
+                print(f"  Poisson gave {len(mesh.triangles)} tris — "
+                      f"falling back to ball-pivoting")
+                mesh = self.reconstruct_ball_pivot(combined)
         else:
             mesh = self.reconstruct_ball_pivot(combined)
+
+        if len(mesh.triangles) < 10:
+            raise ValueError(f"Fused reconstruction produced empty mesh")
 
         mesh = self.smooth_mesh(mesh)
         mesh = self.crop_to_bbox(mesh)

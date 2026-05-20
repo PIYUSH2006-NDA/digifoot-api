@@ -41,11 +41,11 @@ class Settings:
     )
 
     # ── V2 Depth pipeline settings ───────────────────────────────────
-    # Camera intrinsics (default = iPhone TrueDepth)
+    # Camera intrinsics (default = iPhone TrueDepth at 640×480)
     CAMERA_FX: float = float(os.getenv("CAMERA_FX", 585.0))
     CAMERA_FY: float = float(os.getenv("CAMERA_FY", 585.0))
-    CAMERA_CX: float = float(os.getenv("CAMERA_CX", 256.0))
-    CAMERA_CY: float = float(os.getenv("CAMERA_CY", 192.0))
+    CAMERA_CX: float = float(os.getenv("CAMERA_CX", 320.0))  # FIX: was 256.0
+    CAMERA_CY: float = float(os.getenv("CAMERA_CY", 240.0))  # FIX: was 192.0
 
     # Depth preprocessing
     DEPTH_SCALE: float = float(os.getenv("DEPTH_SCALE", 1000.0))

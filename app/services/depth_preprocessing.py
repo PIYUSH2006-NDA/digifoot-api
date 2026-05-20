@@ -19,8 +19,8 @@ class DepthPreprocessor:
         self,
         fx: float = 585.0,   # TrueDepth focal length X (pixels)
         fy: float = 585.0,   # TrueDepth focal length Y (pixels)
-        cx: float = 256.0,   # Principal point X
-        cy: float = 192.0,   # Principal point Y
+        cx: float = 320.0,   # FIX: was 256.0 — correct principal point for 640×480
+        cy: float = 240.0,   # FIX: was 192.0 — correct principal point for 640×480
         depth_scale: float = 1000.0,  # uint16 raw → meters divisor
     ):
         self.fx = fx
