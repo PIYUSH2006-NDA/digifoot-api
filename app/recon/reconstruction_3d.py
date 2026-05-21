@@ -210,6 +210,42 @@ class FootReconstructor:
         bbox = pts.get_axis_aligned_bounding_box()
         return mesh.crop(bbox)
 
+    def crop_foot_depth(
+        self,
+        mesh: o3d.geometry.TriangleMesh,
+        max_foot_depth: float = 0.10,
+    ) -> o3d.geometry.TriangleMesh:
+        """
+        Crop mesh in the Z (camera-depth) axis to just the foot.
+
+        A foot scanned from above is only ~5-9 cm tall. But Poisson/fusion
+        produces a mesh ~25 cm deep in Z because:
+          1. Leg/ankle leaks into the depth band at the heel.
+          2. Poisson extrudes open boundary edges toward the camera to make
+             the surface watertight — these extrusions are the "side walls
+             raising too high".
+
+        Keep only [z_min, z_min + max_foot_depth]. Everything deeper (the
+        walls + leg tail) is discarded.
+        """
+        verts = np.asarray(mesh.vertices)
+        if len(verts) == 0:
+            return mesh
+        z_min = float(verts[:, 2].min())
+        z_cut = z_min + max_foot_depth
+
+        # Build a crop box spanning full X/Y but clipped in Z
+        x_min, y_min = verts[:, 0].min(), verts[:, 1].min()
+        x_max, y_max = verts[:, 0].max(), verts[:, 1].max()
+        crop_box = o3d.geometry.AxisAlignedBoundingBox(
+            min_bound=np.array([x_min - 0.01, y_min - 0.01, z_min - 0.005]),
+            max_bound=np.array([x_max + 0.01, y_max + 0.01, z_cut]),
+        )
+        cropped = mesh.crop(crop_box)
+        print(f"  Z-crop: kept [{z_min:.3f}, {z_cut:.3f}]m "
+              f"({len(cropped.vertices)} verts, was {len(verts)})")
+        return cropped
+
     def fill_holes(self, mesh: o3d.geometry.TriangleMesh) -> o3d.geometry.TriangleMesh:
         """Fill small holes in mesh (useful for arch underside gaps)."""
         mesh = mesh.fill_holes()
@@ -288,6 +324,7 @@ class FootReconstructor:
 
         print(f"  [5/6] Smoothing + simplification")
         mesh = self.smooth_mesh(mesh)
+        mesh = self.crop_foot_depth(mesh, max_foot_depth=0.10)
         mesh = self.crop_to_bbox(mesh)
         mesh = self.simplify_mesh(mesh, target_triangles)
 
@@ -307,18 +344,27 @@ class FootReconstructor:
     def fuse_frames(
         self,
         depth_frames: List[np.ndarray],
-        voxel_size: float = 0.001,
+        voxel_size: float = 0.0015,
         output_path: Optional[str] = None,
-        method: str = "poisson",
+        method: str = "ball_pivot",
+        target_triangles: int = 80_000,
+        max_foot_depth: float = 0.10,
     ) -> o3d.geometry.TriangleMesh:
         """
         Fuse multiple depth frames → denser point cloud → mesh.
-        Assumes minor camera motion between frames for richer coverage.
 
-        Typical use: capture 5–15 frames with slight tilt/rotation,
-        then call this for a more complete foot reconstruction.
+        CHANGED (v7.10): default method is now ball_pivot, NOT poisson.
+
+        WHY: Poisson is a *watertight* reconstruction — it must close the
+        volume. A foot scanned from above is a single open surface (top only,
+        no bottom/sides). Poisson seals it by extruding the open boundary
+        edges toward the camera → those extrusions are the "side walls
+        raising too high" the user reported. Ball-pivoting drapes a surface
+        over the points and STOPS at boundaries — correct for an open scan.
+
+        Also: Z-crop to foot depth + decimation (was producing 27-58 MB STLs).
         """
-        print(f"Fusing {len(depth_frames)} frames...")
+        print(f"Fusing {len(depth_frames)} frames (method={method})...")
         combined = o3d.geometry.PointCloud()
 
         for i, d in enumerate(depth_frames):
@@ -333,6 +379,12 @@ class FootReconstructor:
                              f"— foot segmentation isolated almost nothing")
         combined = combined.voxel_down_sample(voxel_size)
         print(f"  After voxel merge: {len(combined.points)}")
+
+        # Extra cleaning pass — fused cloud from many frames has cross-frame
+        # outliers (leg leak, floor leak from individual frames).
+        combined = self.remove_statistical_outliers(combined, nb_neighbors=24,
+                                                    std_ratio=1.8)
+        print(f"  After cross-frame outlier removal: {len(combined.points)}")
         combined = self.estimate_normals(combined)
 
         print("  Reconstructing fused mesh...")
@@ -344,12 +396,23 @@ class FootReconstructor:
                 mesh = self.reconstruct_ball_pivot(combined)
         else:
             mesh = self.reconstruct_ball_pivot(combined)
+            # Ball-pivot can fragment on noisy clouds — fall back to Poisson
+            # ONLY if it produced almost nothing.
+            if len(mesh.triangles) < 200:
+                print(f"  Ball-pivot gave {len(mesh.triangles)} tris — "
+                      f"falling back to poisson")
+                mesh = self.reconstruct_poisson(combined, depth=9)
 
         if len(mesh.triangles) < 10:
             raise ValueError(f"Fused reconstruction produced empty mesh")
 
         mesh = self.smooth_mesh(mesh)
+        # Z-crop FIRST (removes wall extrusions), then tight bbox.
+        mesh = self.crop_foot_depth(mesh, max_foot_depth=max_foot_depth)
         mesh = self.crop_to_bbox(mesh)
+        # FIX: decimate — fuse_frames never simplified → 27-58 MB STLs.
+        mesh = self.simplify_mesh(mesh, target_triangles)
+        print(f"  Final mesh: {len(mesh.vertices)} verts, {len(mesh.triangles)} tris")
 
         if output_path:
             o3d.io.write_triangle_mesh(output_path, mesh)
