@@ -196,6 +196,38 @@ class FootReconstructor:
         mesh.remove_unreferenced_vertices()
         return mesh
 
+    def keep_largest_component(
+        self,
+        mesh: o3d.geometry.TriangleMesh,
+    ) -> o3d.geometry.TriangleMesh:
+        """
+        Keep ONLY the largest connected component of the mesh.
+
+        Scans pick up floor patches, ankle/leg bits, or the user's hand as
+        separate detached blobs (the floating fragments seen in result
+        screenshots). The foot is always the biggest connected piece —
+        everything else is junk. Drop all but the largest cluster.
+        """
+        try:
+            tri_clusters, cluster_n_tri, _ = mesh.cluster_connected_triangles()
+        except Exception as e:
+            print(f"  keep-largest: cluster failed ({e}) — skipping")
+            return mesh
+
+        tri_clusters = np.asarray(tri_clusters)
+        cluster_n_tri = np.asarray(cluster_n_tri)
+        if len(cluster_n_tri) <= 1:
+            return mesh   # already a single piece
+
+        largest = int(cluster_n_tri.argmax())
+        remove = tri_clusters != largest
+        n_removed = int(remove.sum())
+        mesh.remove_triangles_by_mask(remove)
+        mesh.remove_unreferenced_vertices()
+        print(f"  keep-largest: dropped {len(cluster_n_tri) - 1} junk "
+              f"fragment(s), removed {n_removed} triangles")
+        return mesh
+
     def smooth_mesh(
         self,
         mesh: o3d.geometry.TriangleMesh,
@@ -377,6 +409,7 @@ class FootReconstructor:
         print(f"  [5/6] Smoothing + simplification")
         mesh = self.smooth_mesh(mesh)
         mesh = self.remove_nan_vertices(mesh)
+        mesh = self.keep_largest_component(mesh)   # drop floating junk
         mesh = self.crop_foot_depth(mesh, max_foot_depth=0.10)
         mesh = self.crop_to_bbox(mesh)
         mesh = self.simplify_mesh(mesh, target_triangles)
@@ -434,9 +467,13 @@ class FootReconstructor:
         print(f"  After voxel merge: {len(combined.points)}")
 
         # Extra cleaning pass — fused cloud from many frames has cross-frame
-        # outliers (leg leak, floor leak from individual frames).
-        combined = self.remove_statistical_outliers(combined, nb_neighbors=24,
-                                                    std_ratio=1.8)
+        # outliers (leg leak, floor leak, flying pixels from each frame).
+        # Two passes: statistical (removes scattered noise) then radius
+        # (removes sparse islands) — needed for a clean ball-pivot surface.
+        combined = self.remove_statistical_outliers(combined, nb_neighbors=30,
+                                                    std_ratio=1.5)
+        combined = self.remove_radius_outliers(combined, nb_points=12,
+                                               radius=0.008)
         print(f"  After cross-frame outlier removal: {len(combined.points)}")
         combined = self.estimate_normals(combined)
 
@@ -461,6 +498,7 @@ class FootReconstructor:
 
         mesh = self.smooth_mesh(mesh)
         mesh = self.remove_nan_vertices(mesh)
+        mesh = self.keep_largest_component(mesh)   # drop floating junk
         # Z-crop FIRST (removes wall extrusions), then tight bbox.
         mesh = self.crop_foot_depth(mesh, max_foot_depth=max_foot_depth)
         mesh = self.crop_to_bbox(mesh)

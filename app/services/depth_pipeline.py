@@ -312,9 +312,13 @@ class DepthFootPipeline:
             logger.info(f"Multi-frame fusion of {len(valid_frames)} frames")
             mesh = self.recon.fuse_frames(
                 valid_frames,
-                voxel_size=0.001,
+                voxel_size=0.0015,
                 output_path=stl_out_path.replace(".stl", "_pre.obj"),
-                method="poisson",
+                # CHANGED: ball_pivot, not poisson. Poisson is a watertight
+                # reconstruction — on a single-sided foot scan it tears the
+                # surface into the shredded/holey mesh seen in results.
+                # Ball-pivoting drapes a clean open surface over the points.
+                method="ball_pivot",
             )
         else:
             # Single-frame reconstruction
@@ -322,7 +326,7 @@ class DepthFootPipeline:
             mesh = self.recon.reconstruct_from_depth(
                 valid_frames[0],
                 output_path=stl_out_path.replace(".stl", "_pre.obj"),
-                method="poisson",
+                method="ball_pivot",
             )
         result["stages"]["reconstruction"] = {"time": round(time.time() - t0, 2)}
 
