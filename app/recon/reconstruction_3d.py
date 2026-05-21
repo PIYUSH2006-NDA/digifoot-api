@@ -147,11 +147,17 @@ class FootReconstructor:
     ) -> o3d.geometry.TriangleMesh:
         """
         Ball-pivoting reconstruction.
-        Faster than Poisson, non-watertight but good for partial scans.
+        Non-watertight, good for partial/single-sided scans.
+
+        CHANGED (v7.12): radii reduced from [0.5,1,2,4,8]×avg to
+        [0.75,1.5,3]×avg. The large 8×avg ball bridged across real gaps and
+        bulged the surface outward — the bloated lump seen in results.
+        Smaller balls follow the true surface; tiny holes are fine (the foot
+        is an open shell anyway).
         """
         distances = pcd.compute_nearest_neighbor_distance()
-        avg = np.mean(distances)
-        radii = [avg * r for r in [0.5, 1.0, 2.0, 4.0, 8.0]]
+        avg = float(np.mean(distances))
+        radii = [avg * r for r in [0.75, 1.5, 3.0]]
         mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
             pcd, o3d.utility.DoubleVector(radii)
         )
@@ -231,10 +237,18 @@ class FootReconstructor:
     def smooth_mesh(
         self,
         mesh: o3d.geometry.TriangleMesh,
-        laplacian_iter: int = 5,
-        taubin_iter: int = 10,
+        laplacian_iter: int = 8,
+        taubin_iter: int = 30,
     ) -> o3d.geometry.TriangleMesh:
-        """Laplacian + Taubin smoothing to remove scan noise."""
+        """
+        Laplacian + Taubin smoothing to remove scan noise.
+
+        CHANGED (v7.12): laplacian 5→8, taubin 10→30. TrueDepth has ~1-2mm
+        per-pixel noise; fused over 18 frames it becomes visible surface
+        ripple/lumpiness. Heavier Taubin (volume-preserving, won't shrink the
+        foot) rounds it off. Laplacian raised modestly — too much Laplacian
+        alone shrinks the mesh, Taubin does the heavy lifting.
+        """
         mesh = mesh.filter_smooth_laplacian(number_of_iterations=laplacian_iter)
         mesh = mesh.filter_smooth_taubin(number_of_iterations=taubin_iter)
         mesh.compute_vertex_normals()
@@ -284,7 +298,7 @@ class FootReconstructor:
     def crop_foot_depth(
         self,
         mesh: o3d.geometry.TriangleMesh,
-        max_foot_depth: float = 0.10,
+        max_foot_depth: float = 0.16,
     ) -> o3d.geometry.TriangleMesh:
         """
         Crop mesh in the Z (camera-depth) axis to just the foot.
@@ -410,7 +424,7 @@ class FootReconstructor:
         mesh = self.smooth_mesh(mesh)
         mesh = self.remove_nan_vertices(mesh)
         mesh = self.keep_largest_component(mesh)   # drop floating junk
-        mesh = self.crop_foot_depth(mesh, max_foot_depth=0.10)
+        mesh = self.crop_foot_depth(mesh, max_foot_depth=0.16)
         mesh = self.crop_to_bbox(mesh)
         mesh = self.simplify_mesh(mesh, target_triangles)
 
@@ -434,7 +448,7 @@ class FootReconstructor:
         output_path: Optional[str] = None,
         method: str = "ball_pivot",
         target_triangles: int = 80_000,
-        max_foot_depth: float = 0.10,
+        max_foot_depth: float = 0.16,
     ) -> o3d.geometry.TriangleMesh:
         """
         Fuse multiple depth frames → denser point cloud → mesh.
