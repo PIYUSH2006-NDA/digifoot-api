@@ -175,6 +175,27 @@ class FootReconstructor:
     #  Mesh Post-processing
     # ------------------------------------------------------------------ #
 
+    def remove_nan_vertices(
+        self,
+        mesh: o3d.geometry.TriangleMesh,
+    ) -> o3d.geometry.TriangleMesh:
+        """
+        Remove non-finite (NaN/Inf) vertices. Poisson + Laplacian/Taubin
+        smoothing can emit them, which then poisons every downstream
+        np.min / bbox / crop operation.
+        """
+        verts = np.asarray(mesh.vertices)
+        if len(verts) == 0:
+            return mesh
+        bad = ~np.isfinite(verts).all(axis=1)
+        if bad.any():
+            print(f"  Removing {int(bad.sum())} non-finite vertices")
+            mesh.remove_vertices_by_mask(bad)
+        # Also drop degenerate / unreferenced geometry
+        mesh.remove_degenerate_triangles()
+        mesh.remove_unreferenced_vertices()
+        return mesh
+
     def smooth_mesh(
         self,
         mesh: o3d.geometry.TriangleMesh,
@@ -204,11 +225,29 @@ class FootReconstructor:
         self,
         mesh: o3d.geometry.TriangleMesh,
     ) -> o3d.geometry.TriangleMesh:
-        """Crop mesh to tight bounding box (removes Poisson boundary ghosts)."""
-        pts = o3d.geometry.PointCloud()
-        pts.points = mesh.vertices
-        bbox = pts.get_axis_aligned_bounding_box()
-        return mesh.crop(bbox)
+        """
+        Crop mesh to tight bounding box (removes Poisson boundary ghosts).
+
+        FIX (v7.11): guard against empty / all-NaN meshes — Open3D's crop
+        throws "AxisAlignedBoundingBox has zero size or wrong bounds" if the
+        bbox can't be built. Return the mesh unchanged in that case.
+        """
+        verts = np.asarray(mesh.vertices)
+        if len(verts) < 10:
+            print("  bbox-crop: mesh too small — skipping")
+            return mesh
+        if not np.isfinite(verts).all():
+            print("  bbox-crop: ⚠ mesh has non-finite verts — skipping")
+            return mesh
+        try:
+            pts = o3d.geometry.PointCloud()
+            pts.points = mesh.vertices
+            bbox = pts.get_axis_aligned_bounding_box()
+            cropped = mesh.crop(bbox)
+            return cropped if len(cropped.vertices) >= 10 else mesh
+        except Exception as e:
+            print(f"  bbox-crop: ⚠ failed ({e}) — keeping uncropped mesh")
+            return mesh
 
     def crop_foot_depth(
         self,
@@ -218,30 +257,43 @@ class FootReconstructor:
         """
         Crop mesh in the Z (camera-depth) axis to just the foot.
 
-        A foot scanned from above is only ~5-9 cm tall. But Poisson/fusion
-        produces a mesh ~25 cm deep in Z because:
-          1. Leg/ankle leaks into the depth band at the heel.
-          2. Poisson extrudes open boundary edges toward the camera to make
-             the surface watertight — these extrusions are the "side walls
-             raising too high".
+        A foot scanned from above is only ~5-9 cm tall. Poisson/fusion
+        produces a much deeper mesh because of leg leak + watertight wall
+        extrusion. Keep only [z_min, z_min + max_foot_depth].
 
-        Keep only [z_min, z_min + max_foot_depth]. Everything deeper (the
-        walls + leg tail) is discarded.
+        FIX (v7.11): mesh vertices can contain NaN (Poisson + smoothing can
+        emit them). np.min() on a NaN array returns NaN → invalid crop box →
+        0 verts. Use np.nanmin and guard against an all-NaN / empty mesh.
         """
         verts = np.asarray(mesh.vertices)
         if len(verts) == 0:
+            print("  Z-crop: mesh already empty — skipping")
             return mesh
-        z_min = float(verts[:, 2].min())
-        z_cut = z_min + max_foot_depth
 
-        # Build a crop box spanning full X/Y but clipped in Z
-        x_min, y_min = verts[:, 0].min(), verts[:, 1].min()
-        x_max, y_max = verts[:, 0].max(), verts[:, 1].max()
+        finite = np.isfinite(verts).all(axis=1)
+        if not finite.any():
+            print("  Z-crop: ⚠ all vertices non-finite — skipping crop")
+            return mesh
+        vf = verts[finite]
+
+        z_min = float(vf[:, 2].min())
+        z_cut = z_min + max_foot_depth
+        x_min, y_min = float(vf[:, 0].min()), float(vf[:, 1].min())
+        x_max, y_max = float(vf[:, 0].max()), float(vf[:, 1].max())
+
         crop_box = o3d.geometry.AxisAlignedBoundingBox(
             min_bound=np.array([x_min - 0.01, y_min - 0.01, z_min - 0.005]),
             max_bound=np.array([x_max + 0.01, y_max + 0.01, z_cut]),
         )
         cropped = mesh.crop(crop_box)
+
+        # If the crop somehow emptied the mesh, keep the original — a too-tall
+        # mesh is far better than a failed job.
+        if len(cropped.vertices) < 10:
+            print(f"  Z-crop: ⚠ crop left {len(cropped.vertices)} verts — "
+                  f"keeping uncropped mesh")
+            return mesh
+
         print(f"  Z-crop: kept [{z_min:.3f}, {z_cut:.3f}]m "
               f"({len(cropped.vertices)} verts, was {len(verts)})")
         return cropped
@@ -324,6 +376,7 @@ class FootReconstructor:
 
         print(f"  [5/6] Smoothing + simplification")
         mesh = self.smooth_mesh(mesh)
+        mesh = self.remove_nan_vertices(mesh)
         mesh = self.crop_foot_depth(mesh, max_foot_depth=0.10)
         mesh = self.crop_to_bbox(mesh)
         mesh = self.simplify_mesh(mesh, target_triangles)
@@ -407,6 +460,7 @@ class FootReconstructor:
             raise ValueError(f"Fused reconstruction produced empty mesh")
 
         mesh = self.smooth_mesh(mesh)
+        mesh = self.remove_nan_vertices(mesh)
         # Z-crop FIRST (removes wall extrusions), then tight bbox.
         mesh = self.crop_foot_depth(mesh, max_foot_depth=max_foot_depth)
         mesh = self.crop_to_bbox(mesh)
