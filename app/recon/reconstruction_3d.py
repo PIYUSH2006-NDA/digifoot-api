@@ -431,6 +431,7 @@ class FootReconstructor:
         mesh = self.crop_foot_depth(mesh, max_foot_depth=0.16)
         mesh = self.crop_to_bbox(mesh)
         mesh = self.simplify_mesh(mesh, target_triangles)
+        mesh = self.refine_mesh(mesh)   # final cosmetic polish
 
         metrics = self.get_mesh_metrics(mesh)
         print(f"  [6/6] Done. {metrics}")
@@ -520,11 +521,83 @@ class FootReconstructor:
         mesh = self.crop_to_bbox(mesh)
         # FIX: decimate — fuse_frames never simplified → 27-58 MB STLs.
         mesh = self.simplify_mesh(mesh, target_triangles)
+        mesh = self.refine_mesh(mesh)   # final cosmetic polish
         print(f"  Final mesh: {len(mesh.vertices)} verts, {len(mesh.triangles)} tris")
 
         if output_path:
             o3d.io.write_triangle_mesh(output_path, mesh)
             print(f"  Saved fused mesh: {output_path}")
+
+        return mesh
+
+    # ------------------------------------------------------------------ #
+    #  Mesh Refinement (post-processing — additive, no logic change)
+    # ------------------------------------------------------------------ #
+
+    def refine_mesh(
+        self,
+        mesh: o3d.geometry.TriangleMesh,
+    ) -> o3d.geometry.TriangleMesh:
+        """
+        Final cosmetic polish on the reconstructed mesh.
+
+        Pure post-processing — runs AFTER reconstruction + simplification.
+        Does not touch fusion / segmentation / Poisson / crop logic. Every
+        step is wrapped: if it fails, the mesh passes through unchanged, so
+        this can never break a working pipeline.
+
+        Steps:
+          1. Remove tiny disconnected specks left after decimation.
+          2. Fill small holes so the surface reads continuous.
+          3. Extra detail-safe Taubin smoothing (volume-preserving — does
+             NOT shrink toes or flatten the arch) to settle sensor ripple.
+          4. Recompute normals for clean shading / STL export.
+        """
+        if mesh is None or len(mesh.triangles) < 50:
+            return mesh
+
+        # 1. Drop tiny specks (decimation can leave a few stray triangles)
+        try:
+            tri_clusters, n_tri, _ = mesh.cluster_connected_triangles()
+            tri_clusters = np.asarray(tri_clusters)
+            n_tri = np.asarray(n_tri)
+            if len(n_tri) > 1:
+                biggest = int(n_tri.argmax())
+                # remove any cluster smaller than 2% of the largest
+                tiny_cutoff = max(10, int(n_tri[biggest] * 0.02))
+                kill = np.isin(tri_clusters,
+                               np.where(n_tri < tiny_cutoff)[0])
+                if kill.any():
+                    mesh.remove_triangles_by_mask(kill)
+                    mesh.remove_unreferenced_vertices()
+                    print(f"  refine: removed {int(kill.sum())} speck triangles")
+        except Exception as e:
+            print(f"  refine: speck cleanup skipped ({e})")
+
+        # 2. Fill small holes (Open3D >=0.16 has this; guard for older builds)
+        try:
+            filled = mesh.fill_holes()
+            if filled is not None and len(filled.triangles) >= len(mesh.triangles):
+                mesh = filled
+                print("  refine: filled small holes")
+        except Exception as e:
+            print(f"  refine: hole-fill skipped ({e})")
+
+        # 3. Detail-safe smoothing. Taubin is volume-preserving — it removes
+        #    high-frequency sensor ripple without shrinking the foot or
+        #    rounding off the toes. 12 iterations is gentle polish.
+        try:
+            mesh = mesh.filter_smooth_taubin(number_of_iterations=12)
+            print("  refine: applied detail-safe Taubin polish")
+        except Exception as e:
+            print(f"  refine: smoothing skipped ({e})")
+
+        # 4. Clean normals for shading + STL
+        try:
+            mesh.compute_vertex_normals()
+            mesh.compute_triangle_normals()
+        except Exception:
+            pass
 
         return mesh
 
