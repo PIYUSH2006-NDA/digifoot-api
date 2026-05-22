@@ -132,23 +132,11 @@ class DepthFootPipeline:
     def process_single_frame(self, depth: np.ndarray) -> dict:
         """
         Process one depth frame → isolated foot depth.
-
-        CHANGED (v7.13): added an extra denoise pass. TrueDepth has ~1-2mm
-        per-pixel noise; fused over 18 frames it becomes the rippled
-        "tree-bark" surface texture. Killing the noise HERE — before fusion
-        and reconstruction — is far more effective than smoothing the final
-        mesh, because mesh smoothing also melts real toe/arch detail.
-        Order: remove invalid → fill holes → median (kills salt-pepper
-        spikes) → bilateral (edge-preserving smooth) → gaussian (final soft).
         """
+        # Clean
         depth = self.prep.remove_invalid(depth)
         depth = self.prep.fill_holes(depth)
-        # Median first — removes isolated flying-pixel spikes that bilateral
-        # would otherwise smear into the surface.
-        depth = self.prep.median_filter(depth, ksize=5)
         depth = self.prep.bilateral_filter(depth)
-        # Light gaussian to settle residual high-frequency ripple.
-        depth = self.prep.gaussian_smooth(depth, ksize=3)
 
         # Segment
         if self.inference is not None:
@@ -330,7 +318,7 @@ class DepthFootPipeline:
                 # reconstruction — on a single-sided foot scan it tears the
                 # surface into the shredded/holey mesh seen in results.
                 # Ball-pivoting drapes a clean open surface over the points.
-                method="ball_pivot",
+                method="poisson",
             )
         else:
             # Single-frame reconstruction
@@ -338,7 +326,7 @@ class DepthFootPipeline:
             mesh = self.recon.reconstruct_from_depth(
                 valid_frames[0],
                 output_path=stl_out_path.replace(".stl", "_pre.obj"),
-                method="ball_pivot",
+                method="poisson",
             )
         result["stages"]["reconstruction"] = {"time": round(time.time() - t0, 2)}
 

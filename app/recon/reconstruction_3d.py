@@ -155,9 +155,13 @@ class FootReconstructor:
         Smaller balls follow the true surface; tiny holes are fine (the foot
         is an open shell anyway).
         """
+        # Middle-ground radii. [0.75,1.5,3] shattered the mesh into holes;
+        # [0.5,1,2,4,8] bloated it. This spans enough scales to close the
+        # surface without ballooning. Only used as a fallback — Poisson is
+        # primary now.
         distances = pcd.compute_nearest_neighbor_distance()
         avg = float(np.mean(distances))
-        radii = [avg * r for r in [0.75, 1.5, 3.0]]
+        radii = [avg * r for r in [1.0, 2.0, 4.0]]
         mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
             pcd, o3d.utility.DoubleVector(radii)
         )
@@ -477,37 +481,33 @@ class FootReconstructor:
         if len(combined.points) < 100:
             raise ValueError(f"Fused cloud too sparse ({len(combined.points)} pts) "
                              f"— foot segmentation isolated almost nothing")
-        # CHANGED (v7.13): voxel_size 0.0015 → 0.0022. A larger merge cell
-        # averages more points together, and averaging is what cancels
-        # random sensor noise — the rippled surface texture. 2.2mm cells
-        # still keep toe/arch detail (a toe is ~15mm wide).
-        combined = combined.voxel_down_sample(0.0022)
+        combined = combined.voxel_down_sample(voxel_size)
         print(f"  After voxel merge: {len(combined.points)}")
 
-        # Cross-frame cleaning — fused cloud has outliers from every frame
-        # (leg/floor leak, flying pixels). Statistical then radius pass.
+        # Extra cleaning pass — fused cloud from many frames has cross-frame
+        # outliers (leg leak, floor leak, flying pixels from each frame).
+        # Two passes: statistical (removes scattered noise) then radius
+        # (removes sparse islands) — needed for a clean ball-pivot surface.
         combined = self.remove_statistical_outliers(combined, nb_neighbors=30,
                                                     std_ratio=1.5)
         combined = self.remove_radius_outliers(combined, nb_points=12,
-                                               radius=0.009)
+                                               radius=0.008)
         print(f"  After cross-frame outlier removal: {len(combined.points)}")
         combined = self.estimate_normals(combined)
 
         print("  Reconstructing fused mesh...")
-        if method == "poisson":
-            mesh = self.reconstruct_poisson(combined, depth=10)
-            if len(mesh.triangles) < 50:
-                print(f"  Poisson gave {len(mesh.triangles)} tris — "
-                      f"falling back to ball-pivoting")
-                mesh = self.reconstruct_ball_pivot(combined)
-        else:
+        # CHANGED (v7.14): Poisson is now PRIMARY for fused reconstruction.
+        # Ball-pivoting shattered the mesh into thousands of disconnected
+        # speckle-hole fragments on noisy single-angle data — there is no
+        # reliable radius (too small=holes, too big=bloat). Poisson is
+        # watertight and robust: no holes, no shattering. The Z-crop +
+        # keep_largest downstream tame Poisson's only weakness (boundary
+        # wall extrusion). depth=9 is enough detail for a foot.
+        mesh = self.reconstruct_poisson(combined, depth=9)
+        if len(mesh.triangles) < 200:
+            print(f"  Poisson gave {len(mesh.triangles)} tris — "
+                  f"trying ball-pivoting")
             mesh = self.reconstruct_ball_pivot(combined)
-            # Ball-pivot can fragment on noisy clouds — fall back to Poisson
-            # ONLY if it produced almost nothing.
-            if len(mesh.triangles) < 200:
-                print(f"  Ball-pivot gave {len(mesh.triangles)} tris — "
-                      f"falling back to poisson")
-                mesh = self.reconstruct_poisson(combined, depth=9)
 
         if len(mesh.triangles) < 10:
             raise ValueError(f"Fused reconstruction produced empty mesh")
