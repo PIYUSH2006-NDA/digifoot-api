@@ -477,17 +477,19 @@ class FootReconstructor:
         if len(combined.points) < 100:
             raise ValueError(f"Fused cloud too sparse ({len(combined.points)} pts) "
                              f"— foot segmentation isolated almost nothing")
-        combined = combined.voxel_down_sample(voxel_size)
+        # CHANGED (v7.13): voxel_size 0.0015 → 0.0022. A larger merge cell
+        # averages more points together, and averaging is what cancels
+        # random sensor noise — the rippled surface texture. 2.2mm cells
+        # still keep toe/arch detail (a toe is ~15mm wide).
+        combined = combined.voxel_down_sample(0.0022)
         print(f"  After voxel merge: {len(combined.points)}")
 
-        # Extra cleaning pass — fused cloud from many frames has cross-frame
-        # outliers (leg leak, floor leak, flying pixels from each frame).
-        # Two passes: statistical (removes scattered noise) then radius
-        # (removes sparse islands) — needed for a clean ball-pivot surface.
+        # Cross-frame cleaning — fused cloud has outliers from every frame
+        # (leg/floor leak, flying pixels). Statistical then radius pass.
         combined = self.remove_statistical_outliers(combined, nb_neighbors=30,
                                                     std_ratio=1.5)
         combined = self.remove_radius_outliers(combined, nb_points=12,
-                                               radius=0.008)
+                                               radius=0.009)
         print(f"  After cross-frame outlier removal: {len(combined.points)}")
         combined = self.estimate_normals(combined)
 
