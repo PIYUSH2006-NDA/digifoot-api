@@ -1,18 +1,18 @@
 # reconstruction_3d.py
 # Isolated depth map → clean 3D foot mesh
-# Supports: single-frame and multi-frame fusion
+# Optimized for stationary multi-frame fusion and volume-preserving detail
 
 import numpy as np
 import open3d as o3d
 import cv2
-from pathlib import Path
+import warnings
 from typing import List, Optional, Tuple
 
 
 class FootReconstructor:
     """
-    Full 3D reconstruction pipeline:
-      depth_isolated → point cloud → clean → reconstruct mesh → smooth → export
+    Optimized 3D reconstruction pipeline:
+    depth_isolated → point cloud → orient normals → Poisson reconstruct → Taubin smooth → export
     """
 
     def __init__(self, preprocessor):
@@ -27,10 +27,7 @@ class FootReconstructor:
         depth_isolated: np.ndarray,
         colorize: bool = True,
     ) -> o3d.geometry.PointCloud:
-        """
-        Project isolated depth map → Open3D PointCloud.
-        Uses pinhole camera model (fx, fy, cx, cy from preprocessor).
-        """
+        """Project isolated depth map → Open3D PointCloud."""
         h, w = depth_isolated.shape
         i_grid, j_grid = np.meshgrid(np.arange(h), np.arange(w), indexing="ij")
 
@@ -48,70 +45,35 @@ class FootReconstructor:
             cmap = cv2.applyColorMap(
                 (norm_z * 255).astype(np.uint8), cv2.COLORMAP_VIRIDIS
             ).squeeze()
-            colors = cmap[:, ::-1] / 255.0  # BGR → RGB, [0,1]
+            colors = cmap[:, ::-1] / 255.0  # BGR → RGB
             pcd.colors = o3d.utility.Vector3dVector(colors.astype(np.float64))
 
         return pcd
 
     # ------------------------------------------------------------------ #
-    #  Point Cloud Cleaning
+    #  Point Cloud Cleaning & Normals
     # ------------------------------------------------------------------ #
-
-    def remove_statistical_outliers(
-        self,
-        pcd: o3d.geometry.PointCloud,
-        nb_neighbors: int = 20,
-        std_ratio: float = 2.0,
-    ) -> o3d.geometry.PointCloud:
-        """Remove flying pixels and outlier points."""
-        _, ind = pcd.remove_statistical_outlier(
-            nb_neighbors=nb_neighbors, std_ratio=std_ratio
-        )
-        return pcd.select_by_index(ind)
-
-    def remove_radius_outliers(
-        self,
-        pcd: o3d.geometry.PointCloud,
-        nb_points: int = 16,
-        radius: float = 0.01,
-    ) -> o3d.geometry.PointCloud:
-        """Remove isolated sparse points."""
-        _, ind = pcd.remove_radius_outlier(nb_points=nb_points, radius=radius)
-        return pcd.select_by_index(ind)
-
-    def voxel_downsample(
-        self,
-        pcd: o3d.geometry.PointCloud,
-        voxel_size: float = 0.002,
-    ) -> o3d.geometry.PointCloud:
-        """Voxel downsampling for uniform point density."""
-        return pcd.voxel_down_sample(voxel_size)
 
     def clean_pcd(self, pcd: o3d.geometry.PointCloud) -> o3d.geometry.PointCloud:
-        """Apply full cleaning pipeline."""
-        pcd = self.remove_statistical_outliers(pcd)
-        pcd = self.remove_radius_outliers(pcd)
-        pcd = self.voxel_downsample(pcd, voxel_size=0.002)
-        return pcd
-
-    # ------------------------------------------------------------------ #
-    #  Normals
-    # ------------------------------------------------------------------ #
+        """Apply full cleaning pipeline to remove flying pixels."""
+        pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+        pcd, _ = pcd.remove_radius_outlier(nb_points=16, radius=0.01)
+        return pcd.voxel_down_sample(voxel_size=0.002)
 
     def estimate_normals(
         self,
         pcd: o3d.geometry.PointCloud,
-        radius: float = 0.02,
+        radius: float = 0.015,
         max_nn: int = 30,
     ) -> o3d.geometry.PointCloud:
-        """Estimate + orient surface normals (required for Poisson)."""
+        """Estimate + orient surface normals strictly toward camera."""
         pcd.estimate_normals(
             search_param=o3d.geometry.KDTreeSearchParamHybrid(
                 radius=radius, max_nn=max_nn
             )
         )
-        pcd.orient_normals_consistent_tangent_plane(k=15)
-        # Orient toward camera origin
+        # Consistent tangent plane can flip normals on open surfaces. 
+        # Orienting directly to the camera origin is much safer for Poisson.
         pcd.orient_normals_towards_camera_location(np.array([0.0, 0.0, 0.0]))
         return pcd
 
@@ -127,57 +89,27 @@ class FootReconstructor:
         density_percentile: float = 5.0,
     ) -> o3d.geometry.TriangleMesh:
         """
-        Poisson surface reconstruction → watertight mesh.
-        Removes low-density boundary artifacts automatically.
-        Best for smooth, complete foot surfaces.
+        Poisson surface reconstruction.
+        Linear_fit=True is essential for closing open boundaries smoothly without bloating.
         """
         mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-            pcd, depth=depth, scale=scale, linear_fit=False
+            pcd, depth=depth, scale=scale, linear_fit=True
         )
-        # Remove low-density boundary vertices (reconstruction artifacts)
         dens = np.asarray(densities)
-        threshold = np.percentile(dens, density_percentile)
-        remove_mask = dens < threshold
-        mesh.remove_vertices_by_mask(remove_mask)
+        threshold = np.quantile(dens, density_percentile / 100.0)
+        mesh.remove_vertices_by_mask(dens < threshold)
         return mesh
 
     def reconstruct_ball_pivot(
         self,
         pcd: o3d.geometry.PointCloud,
     ) -> o3d.geometry.TriangleMesh:
-        """
-        Ball-pivoting reconstruction.
-        Non-watertight, good for partial/single-sided scans.
-
-        CHANGED (v7.12): radii reduced from [0.5,1,2,4,8]×avg to
-        [0.75,1.5,3]×avg. The large 8×avg ball bridged across real gaps and
-        bulged the surface outward — the bloated lump seen in results.
-        Smaller balls follow the true surface; tiny holes are fine (the foot
-        is an open shell anyway).
-        """
-        # Middle-ground radii. [0.75,1.5,3] shattered the mesh into holes;
-        # [0.5,1,2,4,8] bloated it. This spans enough scales to close the
-        # surface without ballooning. Only used as a fallback — Poisson is
-        # primary now.
+        """Fallback for highly sparse point clouds."""
         distances = pcd.compute_nearest_neighbor_distance()
         avg = float(np.mean(distances))
-        radii = [avg * r for r in [1.0, 2.0, 4.0]]
+        radii = [avg * r for r in [1.0, 1.5, 2.0, 3.0]]
         mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
             pcd, o3d.utility.DoubleVector(radii)
-        )
-        return mesh
-
-    def reconstruct_alpha_shape(
-        self,
-        pcd: o3d.geometry.PointCloud,
-        alpha: float = 0.03,
-    ) -> o3d.geometry.TriangleMesh:
-        """
-        Alpha shape reconstruction.
-        Good for concave shapes (arch of foot).
-        """
-        mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(
-            pcd, alpha
         )
         return mesh
 
@@ -185,177 +117,99 @@ class FootReconstructor:
     #  Mesh Post-processing
     # ------------------------------------------------------------------ #
 
-    def remove_nan_vertices(
+    def smooth_mesh(
         self,
         mesh: o3d.geometry.TriangleMesh,
+        taubin_iter: int = 40,
     ) -> o3d.geometry.TriangleMesh:
         """
-        Remove non-finite (NaN/Inf) vertices. Poisson + Laplacian/Taubin
-        smoothing can emit them, which then poisons every downstream
-        np.min / bbox / crop operation.
+        Pure Taubin smoothing. 
+        Volume-preserving filter that eliminates sensor ripple without shrinking toes.
         """
-        verts = np.asarray(mesh.vertices)
-        if len(verts) == 0:
-            return mesh
-        bad = ~np.isfinite(verts).all(axis=1)
-        if bad.any():
-            print(f"  Removing {int(bad.sum())} non-finite vertices")
-            mesh.remove_vertices_by_mask(bad)
-        # Also drop degenerate / unreferenced geometry
-        mesh.remove_degenerate_triangles()
-        mesh.remove_unreferenced_vertices()
+        mesh = mesh.filter_smooth_taubin(number_of_iterations=taubin_iter)
+        mesh.compute_vertex_normals()
         return mesh
 
     def keep_largest_component(
         self,
         mesh: o3d.geometry.TriangleMesh,
     ) -> o3d.geometry.TriangleMesh:
-        """
-        Keep ONLY the largest connected component of the mesh.
-
-        Scans pick up floor patches, ankle/leg bits, or the user's hand as
-        separate detached blobs (the floating fragments seen in result
-        screenshots). The foot is always the biggest connected piece —
-        everything else is junk. Drop all but the largest cluster.
-        """
+        """Keep ONLY the largest connected component of the mesh."""
         try:
             tri_clusters, cluster_n_tri, _ = mesh.cluster_connected_triangles()
-        except Exception as e:
-            print(f"  keep-largest: cluster failed ({e}) — skipping")
+        except Exception:
             return mesh
 
-        tri_clusters = np.asarray(tri_clusters)
         cluster_n_tri = np.asarray(cluster_n_tri)
         if len(cluster_n_tri) <= 1:
-            return mesh   # already a single piece
+            return mesh
 
         largest = int(cluster_n_tri.argmax())
-        remove = tri_clusters != largest
-        n_removed = int(remove.sum())
+        remove = np.asarray(tri_clusters) != largest
         mesh.remove_triangles_by_mask(remove)
         mesh.remove_unreferenced_vertices()
-        print(f"  keep-largest: dropped {len(cluster_n_tri) - 1} junk "
-              f"fragment(s), removed {n_removed} triangles")
         return mesh
-
-    def smooth_mesh(
-        self,
-        mesh: o3d.geometry.TriangleMesh,
-        laplacian_iter: int = 8,
-        taubin_iter: int = 30,
-    ) -> o3d.geometry.TriangleMesh:
-        """
-        Laplacian + Taubin smoothing to remove scan noise.
-
-        CHANGED (v7.12): laplacian 5→8, taubin 10→30. TrueDepth has ~1-2mm
-        per-pixel noise; fused over 18 frames it becomes visible surface
-        ripple/lumpiness. Heavier Taubin (volume-preserving, won't shrink the
-        foot) rounds it off. Laplacian raised modestly — too much Laplacian
-        alone shrinks the mesh, Taubin does the heavy lifting.
-        """
-        mesh = mesh.filter_smooth_laplacian(number_of_iterations=laplacian_iter)
-        mesh = mesh.filter_smooth_taubin(number_of_iterations=taubin_iter)
-        mesh.compute_vertex_normals()
-        return mesh
-
-    def simplify_mesh(
-        self,
-        mesh: o3d.geometry.TriangleMesh,
-        target_triangles: int = 50_000,
-    ) -> o3d.geometry.TriangleMesh:
-        """Decimate mesh to target triangle count (mobile-friendly)."""
-        current = len(mesh.triangles)
-        if current <= target_triangles:
-            return mesh
-        mesh = mesh.simplify_quadric_decimation(target_triangles)
-        mesh.compute_vertex_normals()
-        return mesh
-
-    def crop_to_bbox(
-        self,
-        mesh: o3d.geometry.TriangleMesh,
-    ) -> o3d.geometry.TriangleMesh:
-        """
-        Crop mesh to tight bounding box (removes Poisson boundary ghosts).
-
-        FIX (v7.11): guard against empty / all-NaN meshes — Open3D's crop
-        throws "AxisAlignedBoundingBox has zero size or wrong bounds" if the
-        bbox can't be built. Return the mesh unchanged in that case.
-        """
-        verts = np.asarray(mesh.vertices)
-        if len(verts) < 10:
-            print("  bbox-crop: mesh too small — skipping")
-            return mesh
-        if not np.isfinite(verts).all():
-            print("  bbox-crop: ⚠ mesh has non-finite verts — skipping")
-            return mesh
-        try:
-            pts = o3d.geometry.PointCloud()
-            pts.points = mesh.vertices
-            bbox = pts.get_axis_aligned_bounding_box()
-            cropped = mesh.crop(bbox)
-            return cropped if len(cropped.vertices) >= 10 else mesh
-        except Exception as e:
-            print(f"  bbox-crop: ⚠ failed ({e}) — keeping uncropped mesh")
-            return mesh
 
     def crop_foot_depth(
         self,
         mesh: o3d.geometry.TriangleMesh,
-        max_foot_depth: float = 0.16,
+        max_foot_depth: float = 0.12,
     ) -> o3d.geometry.TriangleMesh:
-        """
-        Crop mesh in the Z (camera-depth) axis to just the foot.
-
-        A foot scanned from above is only ~5-9 cm tall. Poisson/fusion
-        produces a much deeper mesh because of leg leak + watertight wall
-        extrusion. Keep only [z_min, z_min + max_foot_depth].
-
-        FIX (v7.11): mesh vertices can contain NaN (Poisson + smoothing can
-        emit them). np.min() on a NaN array returns NaN → invalid crop box →
-        0 verts. Use np.nanmin and guard against an all-NaN / empty mesh.
-        """
+        """Crop mesh in the Z (camera-depth) axis to remove Poisson back-wall extrusions."""
         verts = np.asarray(mesh.vertices)
         if len(verts) == 0:
-            print("  Z-crop: mesh already empty — skipping")
             return mesh
-
+        
         finite = np.isfinite(verts).all(axis=1)
         if not finite.any():
-            print("  Z-crop: ⚠ all vertices non-finite — skipping crop")
             return mesh
-        vf = verts[finite]
-
-        z_min = float(vf[:, 2].min())
+        
+        finite_verts = verts[finite]
+        z_min = float(finite_verts[:, 2].min())
         z_cut = z_min + max_foot_depth
-        x_min, y_min = float(vf[:, 0].min()), float(vf[:, 1].min())
-        x_max, y_max = float(vf[:, 0].max()), float(vf[:, 1].max())
+        
+        x_min, y_min = float(finite_verts[:, 0].min()), float(finite_verts[:, 1].min())
+        x_max, y_max = float(finite_verts[:, 0].max()), float(finite_verts[:, 1].max())
 
         crop_box = o3d.geometry.AxisAlignedBoundingBox(
-            min_bound=np.array([x_min - 0.01, y_min - 0.01, z_min - 0.005]),
-            max_bound=np.array([x_max + 0.01, y_max + 0.01, z_cut]),
+            min_bound=np.array([x_min - 0.02, y_min - 0.02, z_min - 0.01]),
+            max_bound=np.array([x_max + 0.02, y_max + 0.02, z_cut]),
         )
         cropped = mesh.crop(crop_box)
+        return cropped if len(cropped.vertices) >= 50 else mesh
 
-        # If the crop somehow emptied the mesh, keep the original — a too-tall
-        # mesh is far better than a failed job.
-        if len(cropped.vertices) < 10:
-            print(f"  Z-crop: ⚠ crop left {len(cropped.vertices)} verts — "
-                  f"keeping uncropped mesh")
-            return mesh
+    def simplify_and_clean(
+        self,
+        mesh: o3d.geometry.TriangleMesh,
+        target_triangles: int = 50_000,
+    ) -> o3d.geometry.TriangleMesh:
+        """Safe decimation and normal computation."""
+        # Clean degenerate geometry before and after decimation
+        mesh.remove_degenerate_triangles()
+        mesh.remove_duplicated_triangles()
+        mesh.remove_duplicated_vertices()
+        mesh.remove_non_manifold_edges()
 
-        print(f"  Z-crop: kept [{z_min:.3f}, {z_cut:.3f}]m "
-              f"({len(cropped.vertices)} verts, was {len(verts)})")
-        return cropped
+        if len(mesh.triangles) > target_triangles:
+            mesh = mesh.simplify_quadric_decimation(target_triangles)
+        
+        mesh.remove_degenerate_triangles()
+        mesh.remove_unreferenced_vertices()
+        
+        # Open3D built-in hole filling for tiny gaps left by decimation
+        try:
+            mesh = mesh.fill_holes()
+        except Exception:
+            pass
 
-    def fill_holes(self, mesh: o3d.geometry.TriangleMesh) -> o3d.geometry.TriangleMesh:
-        """Fill small holes in mesh (useful for arch underside gaps)."""
-        mesh = mesh.fill_holes()
+        mesh.compute_vertex_normals()
         return mesh
 
     def get_mesh_metrics(self, mesh: o3d.geometry.TriangleMesh) -> dict:
         """Return basic mesh quality metrics."""
         pts = np.asarray(mesh.vertices)
+        if len(pts) == 0:
+            return {}
         bounds = pts.max(axis=0) - pts.min(axis=0)
         return {
             "vertices": len(mesh.vertices),
@@ -366,7 +220,7 @@ class FootReconstructor:
         }
 
     # ------------------------------------------------------------------ #
-    #  Full Pipeline
+    #  Full Pipeline (Single Frame)
     # ------------------------------------------------------------------ #
 
     def reconstruct_from_depth(
@@ -376,30 +230,17 @@ class FootReconstructor:
         method: str = "poisson",
         target_triangles: int = 50_000,
     ) -> o3d.geometry.TriangleMesh:
-        """
-        End-to-end: isolated depth map → clean foot mesh.
-
-        Args:
-            depth_isolated: float32 depth (NaN for non-foot pixels)
-            output_path:    save .obj / .ply / .stl if provided
-            method:         'poisson' | 'ball_pivot' | 'alpha_shape'
-            target_triangles: mesh simplification target
-
-        Returns:
-            Open3D TriangleMesh
-        """
+        """End-to-end: isolated depth map → clean foot mesh."""
+        
         print(f"  [1/6] Depth → PointCloud")
         pcd = self.depth_to_pcd(depth_isolated, colorize=True)
-        print(f"        {len(pcd.points)} raw points")
         if len(pcd.points) < 100:
-            raise ValueError(f"Too few 3D points ({len(pcd.points)}) — "
-                             f"depth frame had almost no valid foot pixels")
+            raise ValueError("Too few 3D points — depth frame had almost no valid foot pixels")
 
         print(f"  [2/6] Cleaning outliers")
         pcd = self.clean_pcd(pcd)
-        print(f"        {len(pcd.points)} clean points")
         if len(pcd.points) < 50:
-            raise ValueError(f"Too few points after cleaning ({len(pcd.points)})")
+            raise ValueError("Too few points after cleaning")
 
         print(f"  [3/6] Estimating normals")
         pcd = self.estimate_normals(pcd)
@@ -407,31 +248,26 @@ class FootReconstructor:
         print(f"  [4/6] Surface reconstruction ({method})")
         if method == "poisson":
             mesh = self.reconstruct_poisson(pcd)
-            # Poisson can return an empty mesh on sparse/partial clouds.
-            # Fall back to ball-pivoting which handles open surfaces better.
             if len(mesh.triangles) < 50:
-                print(f"        Poisson gave {len(mesh.triangles)} tris — "
-                      f"falling back to ball-pivoting")
+                print("        Poisson failed — falling back to ball-pivoting")
                 mesh = self.reconstruct_ball_pivot(pcd)
         elif method == "ball_pivot":
             mesh = self.reconstruct_ball_pivot(pcd)
-        elif method == "alpha_shape":
-            mesh = self.reconstruct_alpha_shape(pcd)
         else:
             raise ValueError(f"Unknown method: {method}")
 
         if len(mesh.triangles) < 10:
-            raise ValueError(f"Reconstruction produced an empty mesh "
-                             f"({len(mesh.triangles)} triangles)")
+            raise ValueError("Reconstruction produced an empty mesh")
 
         print(f"  [5/6] Smoothing + simplification")
-        mesh = self.smooth_mesh(mesh)
-        mesh = self.remove_nan_vertices(mesh)
-        mesh = self.keep_largest_component(mesh)   # drop floating junk
-        mesh = self.crop_foot_depth(mesh, max_foot_depth=0.16)
-        mesh = self.crop_to_bbox(mesh)
-        mesh = self.simplify_mesh(mesh, target_triangles)
-        mesh = self.refine_mesh(mesh)   # final cosmetic polish
+        mesh = self.keep_largest_component(mesh)
+        mesh = self.crop_foot_depth(mesh, max_foot_depth=0.12)
+        
+        # Heavy Taubin smooth to eliminate sensor ripple
+        mesh = self.smooth_mesh(mesh, taubin_iter=40)
+        
+        # Decimate and clean degenerate triangles
+        mesh = self.simplify_and_clean(mesh, target_triangles)
 
         metrics = self.get_mesh_metrics(mesh)
         print(f"  [6/6] Done. {metrics}")
@@ -443,193 +279,42 @@ class FootReconstructor:
         return mesh
 
     # ------------------------------------------------------------------ #
-    #  Multi-Frame Fusion
+    #  Stationary Multi-Frame Fusion (2D Temporal Fusion)
     # ------------------------------------------------------------------ #
 
-    def fuse_frames(
+    def fuse_stationary_frames(
         self,
         depth_frames: List[np.ndarray],
-        voxel_size: float = 0.0015,
         output_path: Optional[str] = None,
-        method: str = "ball_pivot",
-        target_triangles: int = 80_000,
-        max_foot_depth: float = 0.16,
+        target_triangles: int = 50_000,
     ) -> o3d.geometry.TriangleMesh:
         """
-        Fuse multiple depth frames → denser point cloud → mesh.
-
-        CHANGED (v7.10): default method is now ball_pivot, NOT poisson.
-
-        WHY: Poisson is a *watertight* reconstruction — it must close the
-        volume. A foot scanned from above is a single open surface (top only,
-        no bottom/sides). Poisson seals it by extruding the open boundary
-        edges toward the camera → those extrusions are the "side walls
-        raising too high" the user reported. Ball-pivoting drapes a surface
-        over the points and STOPS at boundaries — correct for an open scan.
-
-        Also: Z-crop to foot depth + decimation (was producing 27-58 MB STLs).
+        For stationary cameras: Fuses depth maps in 2D using a temporal median.
+        This completely eliminates sensor Z-jitter and flying pixels BEFORE 
+        creating a single 3D point cloud, resulting in a glass-smooth surface.
         """
-        print(f"Fusing {len(depth_frames)} frames (method={method})...")
-        combined = o3d.geometry.PointCloud()
+        print(f"\n--- Fusing {len(depth_frames)} stationary frames in 2D ---")
 
-        for i, d in enumerate(depth_frames):
-            pcd_i = self.depth_to_pcd(d)
-            pcd_i = self.remove_statistical_outliers(pcd_i)
-            combined += pcd_i
-            print(f"  Frame {i+1}: {len(pcd_i.points)} pts")
+        # Stack all depth frames into a single 3D array: (Time, Height, Width)
+        stack = np.stack(depth_frames, axis=0).astype(np.float32)
 
-        print(f"  Total before fusion downsample: {len(combined.points)}")
-        if len(combined.points) < 100:
-            raise ValueError(f"Fused cloud too sparse ({len(combined.points)} pts) "
-                             f"— foot segmentation isolated almost nothing")
-        combined = combined.voxel_down_sample(voxel_size)
-        print(f"  After voxel merge: {len(combined.points)}")
+        # Mask out invalid pixels (0 or negative) with NaN 
+        stack[stack <= 0] = np.nan
 
-        # Extra cleaning pass — fused cloud from many frames has cross-frame
-        # outliers (leg leak, floor leak, flying pixels from each frame).
-        # Two passes: statistical (removes scattered noise) then radius
-        # (removes sparse islands) — needed for a clean ball-pivot surface.
-        combined = self.remove_statistical_outliers(combined, nb_neighbors=30,
-                                                    std_ratio=1.5)
-        combined = self.remove_radius_outliers(combined, nb_points=12,
-                                               radius=0.008)
-        print(f"  After cross-frame outlier removal: {len(combined.points)}")
-        combined = self.estimate_normals(combined)
+        # Compute the median depth per pixel across time.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            fused_depth = np.nanmedian(stack, axis=0)
 
-        print("  Reconstructing fused mesh...")
-        # CHANGED (v7.14): Poisson is now PRIMARY for fused reconstruction.
-        # Ball-pivoting shattered the mesh into thousands of disconnected
-        # speckle-hole fragments on noisy single-angle data — there is no
-        # reliable radius (too small=holes, too big=bloat). Poisson is
-        # watertight and robust: no holes, no shattering. The Z-crop +
-        # keep_largest downstream tame Poisson's only weakness (boundary
-        # wall extrusion). depth=9 is enough detail for a foot.
-        mesh = self.reconstruct_poisson(combined, depth=9)
-        if len(mesh.triangles) < 200:
-            print(f"  Poisson gave {len(mesh.triangles)} tris — "
-                  f"trying ball-pivoting")
-            mesh = self.reconstruct_ball_pivot(combined)
+        # Restore NaN values back to 0.0 for the background
+        fused_depth[np.isnan(fused_depth)] = 0.0
 
-        if len(mesh.triangles) < 10:
-            raise ValueError(f"Fused reconstruction produced empty mesh")
+        print("2D Temporal Fusion complete. Generating single clean mesh...\n")
 
-        mesh = self.smooth_mesh(mesh)
-        mesh = self.remove_nan_vertices(mesh)
-        mesh = self.keep_largest_component(mesh)   # drop floating junk
-        # Z-crop FIRST (removes wall extrusions), then tight bbox.
-        mesh = self.crop_foot_depth(mesh, max_foot_depth=max_foot_depth)
-        mesh = self.crop_to_bbox(mesh)
-        # FIX: decimate — fuse_frames never simplified → 27-58 MB STLs.
-        mesh = self.simplify_mesh(mesh, target_triangles)
-        mesh = self.refine_mesh(mesh)   # final cosmetic polish
-        print(f"  Final mesh: {len(mesh.vertices)} verts, {len(mesh.triangles)} tris")
-
-        if output_path:
-            o3d.io.write_triangle_mesh(output_path, mesh)
-            print(f"  Saved fused mesh: {output_path}")
-
-        return mesh
-
-    # ------------------------------------------------------------------ #
-    #  Mesh Refinement (post-processing — additive, no logic change)
-    # ------------------------------------------------------------------ #
-
-    def refine_mesh(
-        self,
-        mesh: o3d.geometry.TriangleMesh,
-    ) -> o3d.geometry.TriangleMesh:
-        """
-        Final cosmetic polish on the reconstructed mesh.
-
-        Pure post-processing — runs AFTER reconstruction + simplification.
-        Does not touch fusion / segmentation / Poisson / crop logic. Every
-        step is wrapped: if it fails, the mesh passes through unchanged, so
-        this can never break a working pipeline.
-
-        Steps:
-          1. Remove tiny disconnected specks left after decimation.
-          2. Fill small holes so the surface reads continuous.
-          3. Extra detail-safe Taubin smoothing (volume-preserving — does
-             NOT shrink toes or flatten the arch) to settle sensor ripple.
-          4. Recompute normals for clean shading / STL export.
-        """
-        if mesh is None or len(mesh.triangles) < 50:
-            return mesh
-
-        # 1. Drop tiny specks (decimation can leave a few stray triangles)
-        try:
-            tri_clusters, n_tri, _ = mesh.cluster_connected_triangles()
-            tri_clusters = np.asarray(tri_clusters)
-            n_tri = np.asarray(n_tri)
-            if len(n_tri) > 1:
-                biggest = int(n_tri.argmax())
-                # remove any cluster smaller than 2% of the largest
-                tiny_cutoff = max(10, int(n_tri[biggest] * 0.02))
-                kill = np.isin(tri_clusters,
-                               np.where(n_tri < tiny_cutoff)[0])
-                if kill.any():
-                    mesh.remove_triangles_by_mask(kill)
-                    mesh.remove_unreferenced_vertices()
-                    print(f"  refine: removed {int(kill.sum())} speck triangles")
-        except Exception as e:
-            print(f"  refine: speck cleanup skipped ({e})")
-
-        # 2. Fill small holes (Open3D >=0.16 has this; guard for older builds)
-        try:
-            filled = mesh.fill_holes()
-            if filled is not None and len(filled.triangles) >= len(mesh.triangles):
-                mesh = filled
-                print("  refine: filled small holes")
-        except Exception as e:
-            print(f"  refine: hole-fill skipped ({e})")
-
-        # 3. Detail-safe smoothing. Taubin is volume-preserving — it removes
-        #    high-frequency sensor ripple without shrinking the foot or
-        #    rounding off the toes. 12 iterations is gentle polish.
-        try:
-            mesh = mesh.filter_smooth_taubin(number_of_iterations=12)
-            print("  refine: applied detail-safe Taubin polish")
-        except Exception as e:
-            print(f"  refine: smoothing skipped ({e})")
-
-        # 4. Clean normals for shading + STL
-        try:
-            mesh.compute_vertex_normals()
-            mesh.compute_triangle_normals()
-        except Exception:
-            pass
-
-        return mesh
-
-    # ------------------------------------------------------------------ #
-    #  Measurements
-    # ------------------------------------------------------------------ #
-
-    def measure_foot(self, mesh: o3d.geometry.TriangleMesh) -> dict:
-        """
-        Extract key foot measurements from mesh.
-        Assumes foot axis aligned with Z or X axis.
-        """
-        pts = np.asarray(mesh.vertices)
-        bounds_min = pts.min(axis=0)
-        bounds_max = pts.max(axis=0)
-        extents = bounds_max - bounds_min
-
-        # Sort extents: length = max, width = mid, height = min
-        sorted_extents = np.sort(extents)[::-1]
-        length_mm = sorted_extents[0] * 1000
-        width_mm = sorted_extents[1] * 1000
-        height_mm = sorted_extents[2] * 1000
-
-        # EU shoe size estimate (very rough, for demonstration)
-        # EU size ≈ foot_length_mm * (3/2) * (10/25.4) ... simplified
-        eu_approx = round(length_mm / 6.67)
-
-        return {
-            "length_mm": round(length_mm, 1),
-            "width_mm": round(width_mm, 1),
-            "height_mm": round(height_mm, 1),
-            "eu_size_approx": eu_approx,
-            "vertices": len(mesh.vertices),
-            "triangles": len(mesh.triangles),
-        }
+        # Pass this single, ultra-clean depth map into the standard pipeline.
+        return self.reconstruct_from_depth(
+            depth_isolated=fused_depth,
+            output_path=output_path,
+            method="poisson",
+            target_triangles=target_triangles
+        )
