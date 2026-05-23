@@ -308,17 +308,17 @@ class DepthFootPipeline:
         # ── Stage 5: 3D reconstruction ──────────────────────────────── #
         t0 = time.time()
         if len(valid_frames) >= 3:
-            # Multi-frame fusion
-            logger.info(f"Multi-frame fusion of {len(valid_frames)} frames")
-            mesh = self.recon.fuse_frames(
+            # Stationary multi-frame fusion. The phone is fixed on the floor,
+            # camera facing up — every frame is the same viewpoint of a still
+            # foot. fuse_stationary_frames takes the per-pixel median across
+            # all frames, which cancels sensor jitter / flying pixels before
+            # meshing. Signature: (depth_frames, output_path, target_triangles)
+            # — NO voxel_size, NO method (it always uses Poisson internally).
+            logger.info(f"Stationary fusion of {len(valid_frames)} frames")
+            mesh = self.recon.fuse_stationary_frames(
                 valid_frames,
-                voxel_size=0.0015,
                 output_path=stl_out_path.replace(".stl", "_pre.obj"),
-                # CHANGED: ball_pivot, not poisson. Poisson is a watertight
-                # reconstruction — on a single-sided foot scan it tears the
-                # surface into the shredded/holey mesh seen in results.
-                # Ball-pivoting drapes a clean open surface over the points.
-                method="poisson",
+                target_triangles=50_000,
             )
         else:
             # Single-frame reconstruction
