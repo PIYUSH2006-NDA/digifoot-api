@@ -59,6 +59,14 @@ class FootReconstructor:
         all_valid = valid_r_c & valid_r1_c & valid_r_c1 & valid_r1_c1
         r, c = np.where(all_valid)
 
+        # Guard: if the depth map has no valid 2x2 patches (empty / too sparse
+        # segmentation), np.max([...], axis=0) below would crash on empty
+        # input. Return an empty mesh — reconstruct_from_depth's <50-triangle
+        # check then raises a clear error instead of an obscure numpy crash.
+        if len(r) == 0:
+            print("  reconstruct_25d: no valid surface patches in depth map")
+            return o3d.geometry.TriangleMesh()
+
         # Get the vertex indices for the 4 corners of each valid patch
         idx00 = vertex_idx[r, c]
         idx10 = vertex_idx[r+1, c]
@@ -79,12 +87,15 @@ class FootReconstructor:
         # Construct standard two triangles per quad cell (Counter-clockwise winding)
         tris1 = np.stack([idx00, idx01, idx10], axis=1)
         tris2 = np.stack([idx01, idx11, idx10], axis=1)
-        triangles = np.vstack([tris1, tris2])
+        triangles = np.vstack([tris1, tris2]).astype(np.int32)
 
         # Construct Open3D Mesh
         mesh = o3d.geometry.TriangleMesh()
         mesh.vertices = o3d.utility.Vector3dVector(pts)
-        mesh.triangles = o3d.utility.Vector3Vector(triangles)
+        # FIX: the class is Vector3iVector (integer 3-vectors for triangle
+        # indices) — not Vector3Vector, which does not exist. Vector3dVector
+        # is for float vertices; Vector3iVector is for int triangle indices.
+        mesh.triangles = o3d.utility.Vector3iVector(triangles)
 
         mesh.compute_vertex_normals()
         mesh.compute_triangle_normals()
