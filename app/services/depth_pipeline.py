@@ -94,9 +94,12 @@ class DepthFootPipeline:
         return frames
 
     def process_single_frame(self, depth: np.ndarray) -> dict:
+        # v8 pipeline: stronger edge-preserving denoise; the heavy lifting on
+        # noise reduction happens HERE in 2D, not in mesh smoothing — that's
+        # what stops the previous "uniform Taubin melted everything" problem.
         depth = self.prep.remove_invalid(depth)
         depth = self.prep.fill_holes(depth)
-        depth = self.prep.bilateral_filter(depth)
+        depth = self.prep.edge_aware_refine(depth, passes=2)
 
         if self.inference is not None:
             seg = self.inference.hybrid_inference(depth)
@@ -109,6 +112,17 @@ class DepthFootPipeline:
                 "conf": 1.0 if geo["valid"] else 0.0,
                 "method": "geometric",
             }
+
+        # Smooth the silhouette mask before it's used downstream — kills the
+        # pixel-jagged mesh boundary at the source.
+        if seg.get("valid") and seg.get("mask") is not None:
+            smooth_mask = self.prep.smooth_silhouette_mask(seg["mask"])
+            seg["mask"] = smooth_mask
+            # Re-apply smoothed mask to the isolated depth so reconstruction
+            # input and mask agree exactly.
+            di = seg["depth_isolated"].copy()
+            di[smooth_mask < 128] = np.nan
+            seg["depth_isolated"] = di
         return seg
 
     @staticmethod
@@ -204,19 +218,40 @@ class DepthFootPipeline:
 
         # 3D Mesh Generation & Formatting
         t0 = time.time()
-        if len(valid_frames) >= 3:
-            logger.info(f"Triggering stationary 2D median calculation layer over {len(valid_frames)} frames.")
+
+        # v8: joint-bilateral 2x upsample on each isolated depth map BEFORE
+        # meshing. This breaks the pixel-grid quantization that caused the
+        # staircase triangulation in the previous pipeline. The mask is
+        # nearest-neighbor upsampled to keep the silhouette sharp.
+        upsampled_frames: List[np.ndarray] = []
+        upsampled_masks: List[np.ndarray] = []
+        for df, m in zip(valid_frames, valid_masks):
+            up_d = self.prep.joint_bilateral_upsample(df, scale=2)
+            up_m = cv2.resize(m, (up_d.shape[1], up_d.shape[0]),
+                              interpolation=cv2.INTER_NEAREST)
+            upsampled_frames.append(up_d)
+            upsampled_masks.append(up_m)
+
+        # Union of per-frame masks (= "any frame thought this pixel was foot")
+        fused_mask = upsampled_masks[0].copy()
+        for m in upsampled_masks[1:]:
+            fused_mask = cv2.bitwise_or(fused_mask, m)
+
+        if len(upsampled_frames) >= 3:
+            logger.info(f"Stationary fusion over {len(upsampled_frames)} upsampled frames.")
             mesh = self.recon.fuse_stationary_frames(
-                valid_frames,
+                upsampled_frames,
                 output_path=stl_out_path.replace(".stl", "_pre.obj"),
-                target_triangles=50_000,
+                target_triangles=60_000,
+                mask=fused_mask,
             )
         else:
-            logger.info("Reconstructing single isolated frame index input vector maps.")
+            logger.info("Reconstructing single upsampled frame.")
             mesh = self.recon.reconstruct_from_depth(
-                valid_frames[0],
+                upsampled_frames[0],
                 output_path=stl_out_path.replace(".stl", "_pre.obj"),
-                method="2.5d_grid",
+                target_triangles=60_000,
+                mask=upsampled_masks[0],
             )
         result["stages"]["reconstruction"] = {"time": round(time.time() - t0, 2)}
 

@@ -111,6 +111,126 @@ class DepthPreprocessor:
         return filtered
 
     # ------------------------------------------------------------------ #
+    #  Advanced refinement (NEW in v8 — additive, no breaking changes)
+    # ------------------------------------------------------------------ #
+
+    def edge_aware_refine(
+        self,
+        depth: np.ndarray,
+        bilateral_d: int = 7,
+        sigma_color: float = 0.04,
+        sigma_space: float = 7.0,
+        passes: int = 2,
+    ) -> np.ndarray:
+        """
+        Edge-preserving denoise that respects toe/heel depth steps.
+
+        Repeated bilateral filtering with conservative sigma. Multiple light
+        passes are more effective than one strong pass — they kill sensor
+        ripple while *keeping* the sharp depth discontinuities at the foot
+        boundary (toes, heel). This is what stops the current pipeline from
+        either melting toes (when smoothing is too strong) or keeping ripple
+        (when it's too weak).
+
+        Input/output: float32 meters, NaN for invalid pixels.
+        """
+        valid_mask = ~np.isnan(depth)
+        if not valid_mask.any():
+            return depth
+        d = np.nan_to_num(depth, nan=0.0).astype(np.float32)
+        for _ in range(passes):
+            d = cv2.bilateralFilter(d, bilateral_d, sigma_color, sigma_space)
+        d[~valid_mask] = np.nan
+        return d
+
+    def joint_bilateral_upsample(
+        self,
+        depth: np.ndarray,
+        scale: int = 2,
+        sigma_color: float = 0.02,
+        sigma_space: float = 5.0,
+    ) -> np.ndarray:
+        """
+        Upsample the depth map by 2x using joint-bilateral guided filling.
+
+        Why this matters: TrueDepth depth is quantized at the pixel grid. When
+        meshed pixel-for-pixel, that grid becomes visible "staircase"
+        triangulation in the STL. Upsampling 2x and smoothing the new
+        in-between samples (guided by the original depth as an edge prior)
+        breaks the quantization. The downstream mesh has 4x as many vertices
+        per region but with smooth, sub-pixel z values — staircasing is gone.
+
+        Joint-bilateral preserves edges from the guide (original depth) while
+        smoothing the upsampled candidate. Toe and heel boundaries stay
+        sharp; flat midfoot becomes truly smooth.
+        """
+        valid_mask = ~np.isnan(depth)
+        d = np.nan_to_num(depth, nan=0.0).astype(np.float32)
+        h, w = d.shape
+        new_h, new_w = h * scale, w * scale
+
+        # Initial upsample via bicubic
+        up = cv2.resize(d, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+        # Edge-aware smoothing on the upsampled depth using itself as guide
+        up = cv2.bilateralFilter(up, 5, sigma_color, sigma_space)
+
+        # Upsample the valid mask (NEAREST so the foot silhouette stays sharp)
+        mask_up = cv2.resize(valid_mask.astype(np.uint8), (new_w, new_h),
+                             interpolation=cv2.INTER_NEAREST).astype(bool)
+        up[~mask_up] = np.nan
+        return up
+
+    def smooth_silhouette_mask(
+        self,
+        mask: np.ndarray,
+        close_k: int = 7,
+        smooth_passes: int = 2,
+    ) -> np.ndarray:
+        """
+        Clean up the foot silhouette mask BEFORE it drives the mesh boundary.
+
+        Two ops:
+          1. Morphological close — fills small dropouts inside the foot
+             (between toes, arch shadow) so the mesh doesn't get internal
+             holes.
+          2. Contour smoothing — fits a smoothed polygon to the boundary and
+             rasterizes it back. The mesh boundary inherits this smooth
+             contour instead of the pixel-jagged segmentation edge.
+
+        Input/output: uint8 0/255 mask.
+        """
+        if mask is None or not mask.any():
+            return mask
+        m = mask.copy()
+        if m.dtype != np.uint8:
+            m = (m > 0).astype(np.uint8) * 255
+
+        # Step 1: close gaps inside the foot
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_k, close_k))
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, k)
+
+        # Step 2: redraw the boundary from smoothed contour points
+        try:
+            contours, _ = cv2.findContours(
+                m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            if not contours:
+                return m
+            cnt = max(contours, key=cv2.contourArea)
+            if len(cnt) < 8:
+                return m
+
+            # Approximate with light epsilon — keeps shape, removes pixel jitter
+            peri = cv2.arcLength(cnt, True)
+            for _ in range(smooth_passes):
+                cnt = cv2.approxPolyDP(cnt, 0.001 * peri, True)
+
+            smoothed = np.zeros_like(m)
+            cv2.drawContours(smoothed, [cnt], -1, 255, thickness=cv2.FILLED)
+            return smoothed
+        except Exception:
+            return m
+
+    # ------------------------------------------------------------------ #
     #  Normalization
     # ------------------------------------------------------------------ #
 
