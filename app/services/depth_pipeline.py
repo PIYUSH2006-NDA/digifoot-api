@@ -219,39 +219,34 @@ class DepthFootPipeline:
         # 3D Mesh Generation & Formatting
         t0 = time.time()
 
-        # v8: joint-bilateral 2x upsample on each isolated depth map BEFORE
-        # meshing. This breaks the pixel-grid quantization that caused the
-        # staircase triangulation in the previous pipeline. The mask is
-        # nearest-neighbor upsampled to keep the silhouette sharp.
-        upsampled_frames: List[np.ndarray] = []
-        upsampled_masks: List[np.ndarray] = []
-        for df, m in zip(valid_frames, valid_masks):
-            up_d = self.prep.joint_bilateral_upsample(df, scale=2)
-            up_m = cv2.resize(m, (up_d.shape[1], up_d.shape[0]),
-                              interpolation=cv2.INTER_NEAREST)
-            upsampled_frames.append(up_d)
-            upsampled_masks.append(up_m)
-
-        # Union of per-frame masks (= "any frame thought this pixel was foot")
-        fused_mask = upsampled_masks[0].copy()
-        for m in upsampled_masks[1:]:
+        # v8.1 FIX: NO upsampling. The previous version doubled the depth
+        # map resolution with joint_bilateral_upsample, but self.prep.fx/cx/cy
+        # stayed at the ORIGINAL camera intrinsics — so back-projection
+        # stretched world coordinates by ~2× (and worse at frame edges),
+        # producing meshes with 700-1900mm "foot lengths". Bug seen in jobs
+        # 667939d6, eb38dc20, e644d603, f89b0364 (all 2026-05-30).
+        # Fix: stop upsampling. The Poisson + edge-aware refine already give
+        # smooth output; the upsample-for-anti-staircase was speculative
+        # gain at the cost of unit-correctness.
+        fused_mask = valid_masks[0].copy()
+        for m in valid_masks[1:]:
             fused_mask = cv2.bitwise_or(fused_mask, m)
 
-        if len(upsampled_frames) >= 3:
-            logger.info(f"Stationary fusion over {len(upsampled_frames)} upsampled frames.")
+        if len(valid_frames) >= 3:
+            logger.info(f"Stationary fusion over {len(valid_frames)} frames.")
             mesh = self.recon.fuse_stationary_frames(
-                upsampled_frames,
+                valid_frames,
                 output_path=stl_out_path.replace(".stl", "_pre.obj"),
                 target_triangles=60_000,
                 mask=fused_mask,
             )
         else:
-            logger.info("Reconstructing single upsampled frame.")
+            logger.info("Reconstructing single frame.")
             mesh = self.recon.reconstruct_from_depth(
-                upsampled_frames[0],
+                valid_frames[0],
                 output_path=stl_out_path.replace(".stl", "_pre.obj"),
                 target_triangles=60_000,
-                mask=upsampled_masks[0],
+                mask=valid_masks[0],
             )
         result["stages"]["reconstruction"] = {"time": round(time.time() - t0, 2)}
 

@@ -39,16 +39,24 @@ class FootReconstructor:
     def _depth_to_oriented_pcd(
         self,
         depth_isolated: np.ndarray,
+        mask: Optional[np.ndarray] = None,
     ) -> o3d.geometry.PointCloud:
         """
         Back-project the isolated depth map and compute proper surface normals.
 
-        Critical: normals are estimated from depth gradients (analytical, fast,
-        and always correct for a heightmap) — far more reliable than k-NN
-        normal estimation, which fails on noisy data near boundaries.
+        v8.1: also accepts an optional mask, applied BEFORE back-projection
+        as a belt-and-suspenders gate. If segmentation mistakenly left
+        non-foot pixels (or fill_holes leaked depth values outside the foot),
+        masking here prevents back-projecting them and stretching the mesh
+        across the whole image plane.
+
+        Normals are estimated from depth gradients (analytical, fast,
+        always correct for a heightmap).
         """
         h, w = depth_isolated.shape
         valid = ~np.isnan(depth_isolated) & (depth_isolated > 0)
+        if mask is not None and mask.shape == depth_isolated.shape:
+            valid = valid & (mask > 0)
         if valid.sum() < 200:
             return o3d.geometry.PointCloud()
 
@@ -579,7 +587,7 @@ class FootReconstructor:
             method:          ignored; kept so the existing pipeline call works
         """
         print("  [1/8] Back-projecting depth with analytical normals")
-        pcd = self._depth_to_oriented_pcd(depth_isolated)
+        pcd = self._depth_to_oriented_pcd(depth_isolated, mask=mask)
         if len(pcd.points) < 200:
             raise ValueError(
                 f"Reconstruction input too sparse: {len(pcd.points)} points")
