@@ -140,14 +140,19 @@ class FootDepthSegmenter:
         return self.isolate_foot_robust(depth)
 
     def isolate_foot_robust(self, depth: np.ndarray,
-                            foot_depth_band: float = 0.14) -> dict:
+                            foot_depth_band: float = 0.085) -> dict:
         """
         Robust foot isolation via nearest-depth-cluster banding.
 
+        The foot sole is the NEAREST surface to the camera (phone flat on
+        floor, sole held above facing down). The sole + forefoot occupy only
+        ~7-9 cm of depth. The previous 0.14 m band reached up the ankle and
+        grabbed leg/shin, which inflated the measured foot. Tightened to
+        0.085 m so only the sole-side of the foot is kept.
+
         Args:
             depth:           float32 depth map in meters (NaN = invalid)
-            foot_depth_band: depth thickness of foot region (m). A foot viewed
-                             from above spans ~12-15 cm front-to-back in depth.
+            foot_depth_band: depth thickness of foot region kept (m).
         """
         empty = {
             "depth_isolated": np.full_like(depth, np.nan),

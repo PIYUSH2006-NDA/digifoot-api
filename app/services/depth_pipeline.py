@@ -36,10 +36,15 @@ class DepthFootPipeline:
         self,
         weights_dir: str = "weights",
         yolo_model_name: str = "foot_yolov8_seg.pt",
-        fx: float = 585.0,
-        fy: float = 585.0,
-        cx: float = 320.0,   
-        cy: float = 240.0,   
+        # TrueDepth depth maps are ~480x640 PORTRAIT with fx~432, cx~240,
+        # cy~320. The previous defaults (585/320/240) were 640x480 RGB-camera
+        # values — wrong axis AND wrong focal length, which scaled every
+        # back-projected coordinate by ~1.35x and skewed the principal point.
+        # That produced 600-820mm "feet" whenever meta.json lacked fx.
+        fx: float = 432.0,
+        fy: float = 432.0,
+        cx: float = 240.0,
+        cy: float = 320.0,
     ):
         self.prep = DepthPreprocessor(fx=fx, fy=fy, cx=cx, cy=cy)
         self.floor = FloorRemover(self.prep)
@@ -94,15 +99,31 @@ class DepthFootPipeline:
         return frames
 
     def process_single_frame(self, depth: np.ndarray) -> dict:
-        # v8 pipeline: stronger edge-preserving denoise; the heavy lifting on
-        # noise reduction happens HERE in 2D, not in mesh smoothing — that's
-        # what stops the previous "uniform Taubin melted everything" problem.
+        # ORDER MATTERS. The previous order ran fill_holes BEFORE
+        # segmentation — but fill_holes (TELEA inpaint) fills the ENTIRE
+        # frame, not just holes inside the foot, turning all 307k pixels into
+        # "valid depth". The nearest-depth-band segmenter then saw a full
+        # frame and failed. Fix: segment on the RAW (invalid-removed) depth
+        # first so the nearest-surface foot blob is found cleanly, THEN fill
+        # holes and refine only WITHIN the foot mask.
         depth = self.prep.remove_invalid(depth)
-        depth = self.prep.fill_holes(depth)
-        depth = self.prep.edge_aware_refine(depth, passes=2)
 
         if self.inference is not None:
-            seg = self.inference.hybrid_inference(depth)
+            # YOLO trained on SYNTHETIC depth only — unreliable on real data
+            # (boxes spanning leg+foot+floor → inflated measurements). Use it
+            # only as a VALIDATOR of the geometric mask, never to expand it.
+            # Flip USE_YOLO_VALIDATOR on after retraining on real depth.
+            USE_YOLO_VALIDATOR = False
+            geo = self.geo_seg.isolate_foot(depth)
+            seg = {
+                "valid": geo["valid"],
+                "mask": geo["mask"],
+                "depth_isolated": geo["depth_isolated"],
+                "conf": 1.0 if geo["valid"] else 0.0,
+                "method": "geometric",
+            }
+            if USE_YOLO_VALIDATOR and geo["valid"]:
+                seg = self._validate_with_yolo(depth, seg)
         else:
             geo = self.geo_seg.isolate_foot(depth)
             seg = {
@@ -113,16 +134,52 @@ class DepthFootPipeline:
                 "method": "geometric",
             }
 
-        # Smooth the silhouette mask before it's used downstream — kills the
-        # pixel-jagged mesh boundary at the source.
-        if seg.get("valid") and seg.get("mask") is not None:
-            smooth_mask = self.prep.smooth_silhouette_mask(seg["mask"])
-            seg["mask"] = smooth_mask
-            # Re-apply smoothed mask to the isolated depth so reconstruction
-            # input and mask agree exactly.
-            di = seg["depth_isolated"].copy()
-            di[smooth_mask < 128] = np.nan
-            seg["depth_isolated"] = di
+        if not seg.get("valid") or seg.get("mask") is None:
+            return seg
+
+        # Smooth silhouette, then fill holes + edge-refine ONLY inside foot.
+        smooth_mask = self.prep.smooth_silhouette_mask(seg["mask"])
+        di = seg["depth_isolated"].copy()
+        di[smooth_mask < 128] = np.nan
+        # Fill holes inside the foot region, refine, then re-clip to mask so
+        # nothing leaks outside the silhouette.
+        di = self.prep.fill_holes(di)
+        di = self.prep.edge_aware_refine(di, passes=2)
+        di[smooth_mask < 128] = np.nan
+        seg["mask"] = smooth_mask
+        seg["depth_isolated"] = di
+        return seg
+
+    def _validate_with_yolo(self, depth: np.ndarray, seg: dict) -> dict:
+        """
+        Use YOLO to confirm the geometric blob is foot-shaped — never to
+        expand it. If YOLO sees a foot overlapping the geometric mask, raise
+        confidence. If YOLO disagrees (box elsewhere / huge), keep geometric
+        but flag low confidence. YOLO cannot add pixels the geometric mask
+        didn't already select.
+        """
+        try:
+            img_3ch = self.prep.to_pseudo_rgb(depth)
+            y = self.inference.run_yolo(img_3ch)
+        except Exception:
+            return seg
+        if y.get("mask") is None:
+            seg["conf"] = 0.5
+            return seg
+        geo_mask = seg["mask"] > 0
+        yolo_mask = y["mask"] > 0
+        inter = (geo_mask & yolo_mask).sum()
+        union = (geo_mask | yolo_mask).sum()
+        iou = inter / union if union > 0 else 0.0
+        seg["conf"] = float(max(0.3, min(1.0, iou + 0.3)))
+        # YOLO only ever RESTRICTS to the agreed region, never expands:
+        if iou > 0.3:
+            agreed = (geo_mask & yolo_mask).astype('uint8') * 255
+            if (agreed > 0).sum() > 1000:
+                seg["mask"] = agreed
+                di = seg["depth_isolated"].copy()
+                di[agreed < 128] = np.nan
+                seg["depth_isolated"] = di
         return seg
 
     @staticmethod
@@ -186,6 +243,37 @@ class DepthFootPipeline:
                 logger.warning(f"Error parse layout metadata parameters: {e}")
 
         result["stages"]["load"] = {"frames": len(frames), "time": round(time.time() - t0, 2)}
+
+        h_d, w_d = frames[0].shape[:2]
+        center_cx, center_cy = w_d / 2.0, h_d / 2.0
+        # The principal point of a depth map sits at (or within a few px of)
+        # the image center. If the configured cx/cy are off-center by more
+        # than ~12% of the dimension, or fx is implausible for this width,
+        # the intrinsics are wrong/stale (e.g. 585/320/240 RGB defaults on a
+        # 480x640 depth map) → recompute from FOV. This MUST catch the
+        # 585/320/240 case that produced 600-820mm feet.
+        import math
+        bad_cx = abs(self.prep.cx - center_cx) > 0.12 * w_d
+        bad_cy = abs(self.prep.cy - center_cy) > 0.12 * h_d
+        # Plausible TrueDepth fx for a 480-wide depth map is ~400-470.
+        # Express as a ratio to width: fx/width ≈ 0.85-1.0. Flag if outside
+        # 0.7-1.25 of the short axis.
+        short = float(min(w_d, h_d))
+        f_ratio = self.prep.fx / short
+        bad_f = not (0.70 <= f_ratio <= 1.25)
+        if bad_cx or bad_cy or bad_f:
+            est_f = short / (2.0 * math.tan(math.radians(55.0) / 2.0))
+            old = (self.prep.fx, self.prep.cx, self.prep.cy)
+            self.prep.fx = est_f
+            self.prep.fy = est_f
+            self.prep.cx = center_cx
+            self.prep.cy = center_cy
+            logger.warning(
+                f"Intrinsics {old} implausible for {w_d}x{h_d} "
+                f"(bad_cx={bad_cx} bad_cy={bad_cy} bad_f={bad_f}) → "
+                f"recomputed fx={self.prep.fx:.1f} cx={self.prep.cx:.1f} cy={self.prep.cy:.1f}")
+        logger.info(f"Using intrinsics fx={self.prep.fx:.1f} fy={self.prep.fy:.1f} "
+                    f"cx={self.prep.cx:.1f} cy={self.prep.cy:.1f} on {w_d}x{h_d} frames")
 
         # Downsample Frame Rates uniformly to handle CPU bottlenecks cleanly
         MAX_FRAMES = 18
